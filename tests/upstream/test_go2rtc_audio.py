@@ -1,0 +1,218 @@
+"""Unit-тесты upsert/remove аудио-стрима вызова (go2rtc.py).
+
+Аудио-мост two-way (audio-bridge-design.md): per-call go2rtc-стрим
+`ffmpeg:http://<bridge>` через REST. PATCH-first / PUT-fallback (как камеры).
+NB: консолидация go2rtc-клиента (R1-R6) отложена — это свежие методы.
+"""
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from custom_components.my_dom_ru.go2rtc import (
+    go2rtc_auth_headers,
+    upsert_audio_stream,
+)
+
+
+class _Ctx:
+    def __init__(self, resp):
+        self._r = resp
+
+    async def __aenter__(self):
+        return self._r
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _resp(status: int):
+    r = AsyncMock()
+    r.status = status
+    r.text = AsyncMock(return_value="")
+    return r
+
+
+def _session(patch_status: int):
+    s = MagicMock()
+    s.patch = MagicMock(return_value=_Ctx(_resp(patch_status)))
+    s.put = MagicMock(return_value=_Ctx(_resp(200)))
+    return s
+
+
+async def test_upsert_audio_stream_patch_first():
+    s = _session(200)
+    await upsert_audio_stream(
+        "http://go2rtc:1984", "mdr_intercom_call", ["ffmpeg:http://h:1/x#audio=opus"], s, {}
+    )
+    s.patch.assert_called_once()
+    s.put.assert_not_called()
+    url = s.patch.call_args.args[0]
+    assert "name=mdr_intercom_call" in url and "/api/streams" in url
+
+
+async def test_upsert_audio_stream_put_fallback_on_patch_4xx():
+    s = _session(404)
+    await upsert_audio_stream("http://go2rtc:1984", "mdr_intercom_call", ["ffmpeg:x"], s, {})
+    s.put.assert_called_once()
+
+
+async def test_upsert_audio_stream_multi_src_video_plus_audio():
+    # B: видео камеры (RTSP) + аудио моста → два src= в query (go2rtc склеивает).
+    s = _session(200)
+    await upsert_audio_stream(
+        "http://go2rtc:1984", "mdr_intercom_call",
+        ["rtsp://127.0.0.1:8554/mdr_5#video=copy", "ffmpeg:http://b:40020#audio=opus"], s, {},
+    )
+    url = s.patch.call_args.args[0]
+    assert url.count("src=") == 2
+    assert "rtsp" in url and "ffmpeg" in url
+
+
+def test_go2rtc_auth_headers():
+    assert go2rtc_auth_headers(None, None) == {}
+    assert go2rtc_auth_headers("u", "") == {}
+    h = go2rtc_auth_headers("user", "pass")
+    assert h["Authorization"].startswith("Basic ")
+
+
+# ─── Проба RTSP-порта ───────────────────────────────────────────────────────
+
+
+async def test_open_rtsp_port_is_detected() -> None:
+    """Открытый порт распознаётся — иначе настройку отвергнут зря."""
+    from custom_components.my_dom_ru.go2rtc import _probe_rtsp_port
+
+    writer = MagicMock()
+    writer.wait_closed = AsyncMock()
+    with patch(
+        "custom_components.my_dom_ru.go2rtc.asyncio.open_connection",
+        new=AsyncMock(return_value=(MagicMock(), writer)),
+    ):
+        assert await _probe_rtsp_port("127.0.0.1", 8554, 1.0) is True
+    writer.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [OSError("отказано"), TimeoutError()])
+async def test_closed_rtsp_port_is_reported(failure) -> None:
+    """Закрытый порт находят при настройке, а не когда видео не пошло.
+
+    HTTP-интерфейс go2rtc может отвечать, а RTSP быть закрыт брандмауэром
+    или собран без модуля — без этой пробы человек узнаёт об этом только
+    когда камера не воспроизводится.
+    """
+    from custom_components.my_dom_ru.go2rtc import _probe_rtsp_port
+
+    with patch(
+        "custom_components.my_dom_ru.go2rtc.asyncio.open_connection",
+        new=AsyncMock(side_effect=failure),
+    ):
+        assert await _probe_rtsp_port("127.0.0.1", 8554, 1.0) is False
+
+
+async def test_reset_while_closing_still_counts_as_open() -> None:
+    """Обрыв при закрытии пробы не означает, что порт закрыт."""
+    from custom_components.my_dom_ru.go2rtc import _probe_rtsp_port
+
+    writer = MagicMock()
+    writer.wait_closed = AsyncMock(side_effect=OSError("connection reset"))
+    with patch(
+        "custom_components.my_dom_ru.go2rtc.asyncio.open_connection",
+        new=AsyncMock(return_value=(MagicMock(), writer)),
+    ):
+        assert await _probe_rtsp_port("127.0.0.1", 8554, 1.0) is True
+
+
+# ─── Снятие стрима вызова ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("status", [200, 204, 404])
+async def test_cleanup_accepts_gone_and_removed(status: int) -> None:
+    """Уже снятый стрим (404) — такой же успех, как только что снятый.
+
+    Иначе повторная уборка выглядела бы как ошибка и уходила в бесконечные
+    попытки.
+    """
+    from custom_components.my_dom_ru.go2rtc import cleanup_go2rtc_stream
+
+    resp = _resp(status)
+    session = MagicMock()
+    session.delete = MagicMock(return_value=_Ctx(resp))
+
+    await cleanup_go2rtc_stream("http://go2rtc:1984", "mdr_call", session)
+
+    assert "src=mdr_call" in session.delete.call_args.args[0]
+    # Успех распознан: тело ответа не читалось ради текста ошибки.
+    resp.text.assert_not_awaited()
+
+
+async def test_cleanup_survives_a_refusal() -> None:
+    """Уборка best-effort: отказ go2rtc не должен всплывать наверх."""
+    from custom_components.my_dom_ru.go2rtc import cleanup_go2rtc_stream
+
+    session = MagicMock()
+    session.delete = MagicMock(return_value=_Ctx(_resp(500)))
+
+    await cleanup_go2rtc_stream("http://go2rtc:1984", "mdr_call", session)
+
+
+async def test_cleanup_survives_a_network_error() -> None:
+    from aiohttp import ClientError
+
+    from custom_components.my_dom_ru.go2rtc import cleanup_go2rtc_stream
+
+    session = MagicMock()
+    session.delete = MagicMock(side_effect=ClientError("сеть"))
+
+    await cleanup_go2rtc_stream("http://go2rtc:1984", "mdr_call", session)
+
+
+async def test_remove_audio_stream_delegates_to_cleanup() -> None:
+    from custom_components.my_dom_ru.go2rtc import remove_audio_stream
+
+    session = MagicMock()
+    session.delete = MagicMock(return_value=_Ctx(_resp(200)))
+
+    await remove_audio_stream("http://go2rtc:1984", "mdr_call", session)
+
+    assert session.delete.called
+
+
+# ─── Создание стрима вызова: запасной путь ──────────────────────────────────
+
+
+async def test_audio_stream_falls_back_to_put_on_network_error() -> None:
+    """Сбой сети на PATCH не отменяет попытку создать стрим заново."""
+    from aiohttp import ClientError
+
+    session = MagicMock()
+    session.patch = MagicMock(side_effect=ClientError("сеть"))
+    session.put = MagicMock(return_value=_Ctx(_resp(200)))
+
+    await upsert_audio_stream("http://go2rtc:1984", "mdr_call", ["src"], session)
+
+    assert session.put.called
+
+
+@pytest.mark.parametrize(
+    "put_outcome",
+    [_resp(500), None],
+)
+async def test_audio_stream_reports_a_real_failure(put_outcome) -> None:
+    """Если и запасной путь не сработал, вызывающий должен об этом узнать.
+
+    Молчаливый отказ означал бы разговор без звука без единого следа в
+    журнале.
+    """
+    from aiohttp import ClientError
+
+    session = MagicMock()
+    session.patch = MagicMock(return_value=_Ctx(_resp(500)))
+    if put_outcome is None:
+        session.put = MagicMock(side_effect=ClientError("сеть"))
+    else:
+        session.put = MagicMock(return_value=_Ctx(put_outcome))
+
+    with pytest.raises(RuntimeError):
+        await upsert_audio_stream("http://go2rtc:1984", "mdr_call", ["src"], session)

@@ -1,0 +1,1427 @@
+{
+  "application": "com.ertelecom.smarthome",
+  "version": "9.10.0",
+  "version_code": 91000020,
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/rest/v1/events/statuses",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "a90/a.java",
+      "line": 14,
+      "body_type": "List"
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/accesscontrols/{accessControlId}/sipdevices",
+      "path_parameters": [
+        "placeId",
+        "accessControlId"
+      ],
+      "query_parameters": [],
+      "source": "ab0/g.java",
+      "line": 13,
+      "body_type": "CreateSipDeviceBody",
+      "body_fields": [
+        "installationId"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/rest/v2/subscriberplaces/{subscriberPlaceId}",
+      "path_parameters": [
+        "subscriberPlaceId"
+      ],
+      "query_parameters": [],
+      "source": "b50/a.java",
+      "line": 14
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/subscribers/profiles/places/{subscriberPlaceId}/nickname",
+      "path_parameters": [
+        "subscriberPlaceId"
+      ],
+      "query_parameters": [],
+      "source": "b50/a.java",
+      "line": 17,
+      "body_type": "String"
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-customer-communication/mobile/v1/communications",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "bb0/a.java",
+      "line": 13,
+      "body_type": "CommunicationsRequestParamsRaw",
+      "body_fields": [
+        "appVersionCode",
+        "appId",
+        "appVersion",
+        "platform"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/v2/confirmation/{login}",
+      "path_parameters": [
+        "login"
+      ],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 19,
+      "body_type": "ContractAddressRaw",
+      "body_fields": [
+        "operatorId",
+        "accountId",
+        "address",
+        "profileId",
+        "subscriberId",
+        "placeId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/v2/guests",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 22,
+      "body_type": "GuestAuthRaw",
+      "body_fields": [
+        "phoneNumber",
+        "authCode",
+        "subscriberInvite",
+        "name",
+        "invitationSendType",
+        "appId",
+        "requestSms"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/v2/recover/{accountId}/{phone}/confirm",
+      "path_parameters": [
+        "accountId",
+        "phone"
+      ],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 25,
+      "body_type": "String"
+    },
+    {
+      "method": "POST",
+      "path": "/auth/v3/auth/{login}/confirmation",
+      "path_parameters": [
+        "login"
+      ],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 28,
+      "body_type": "LoginPhoneRaw",
+      "body_fields": [
+        "operatorId",
+        "login",
+        "accountId",
+        "profileId",
+        "confirm1",
+        "confirm2",
+        "subscriberId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/auth/v2/auth/{login}/password",
+      "path_parameters": [
+        "login"
+      ],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 31,
+      "body_type": "LoginContractRaw",
+      "body_fields": [
+        "login",
+        "timestamp",
+        "hash1",
+        "hash2"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/auth/v2/login/{login}",
+      "path_parameters": [
+        "login"
+      ],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 34
+    },
+    {
+      "method": "POST",
+      "path": "/auth/v2/guests/token",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 37,
+      "body_type": "GuestTokenRaw",
+      "body_fields": [
+        "phoneNumber",
+        "contractAddress",
+        "confirm"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/auth/v2/recover/{accountId}/{phone}",
+      "path_parameters": [
+        "accountId",
+        "phone"
+      ],
+      "query_parameters": [],
+      "source": "bm/a.java",
+      "line": 40
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/subscriberNotifications",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ca0/a.java",
+      "line": 14,
+      "body_type": "SubscriberNotificationRaw",
+      "body_fields": [
+        "appVersionCode",
+        "installationId",
+        "appId",
+        "appVersion",
+        "platform",
+        "pushToken",
+        "isDevelop",
+        "deviceManufacturer",
+        "deviceModelName",
+        "osVersion",
+        "deviceId",
+        "macAddress",
+        "deviceType"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/rest/v1/subscriberNotifications",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ca0/a.java",
+      "line": 17,
+      "body_type": "SubscriberNotificationRaw",
+      "body_fields": [
+        "appVersionCode",
+        "installationId",
+        "appId",
+        "appVersion",
+        "platform",
+        "pushToken",
+        "isDevelop",
+        "deviceManufacturer",
+        "deviceModelName",
+        "osVersion",
+        "deviceId",
+        "macAddress",
+        "deviceType"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v3/subscriber-places",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "db0/a.java",
+      "line": 13
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v3/subscriber-places",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "db0/a.java",
+      "line": 16
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-camera/mobile/v1/connection-request/create",
+      "path_parameters": [],
+      "query_parameters": [
+        "fullName",
+        "phone"
+      ],
+      "source": "e20/a.java",
+      "line": 13
+    },
+    {
+      "method": "GET",
+      "path": "/auth/v2/session/refresh",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ee/a.java",
+      "line": 14
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/places/{placeId}/cameras/play-sound",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [
+        "externalCameraId",
+        "bitrate",
+        "format",
+        "sessionId",
+        "proxyUrl"
+      ],
+      "source": "f10/a.java",
+      "line": 16,
+      "body_type": "String"
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/cameras/play-sound-init",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [
+        "externalCameraId",
+        "bitrate",
+        "format"
+      ],
+      "source": "f10/a.java",
+      "line": 19
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-in-app-market/mobile/v1/goods",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "f20/b.java",
+      "line": 19,
+      "body_type": "SellOfferRequestRaw",
+      "body_fields": [
+        "id",
+        "userName",
+        "userPhone",
+        "installmentAvailable",
+        "equipment",
+        "services"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-in-app-market/mobile/v1/goods",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "f20/b.java",
+      "line": 22,
+      "body_type": "SellOfferRequestForCallbackRaw",
+      "body_fields": [
+        "id",
+        "userName",
+        "userPhone"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-temp-pass/mobile/v1/rest/v1/temp-passes",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "fb0/a.java",
+      "line": 14
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/subscriberinvites",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "fv/a.java",
+      "line": 13,
+      "body_type": "SubscriberInviteRaw",
+      "body_fields": [
+        "placeId"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/confirmation",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "fw/a.java",
+      "line": 15
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/confirmation",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [
+        "confirm"
+      ],
+      "source": "fw/a.java",
+      "line": 18
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/accesscontrols/activations",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "fw/a.java",
+      "line": 21,
+      "body_type": "ActivationBodyRaw",
+      "body_fields": [
+        "tariffId",
+        "documentsId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-customer-device/mobile/public/v1/customers/device-installations",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "gb0/a.java",
+      "line": 14,
+      "body_type": "EntrypointParamsBodyRaw",
+      "body_fields": [
+        "appVersionCode",
+        "installationId",
+        "appId",
+        "appVersion",
+        "platform",
+        "pushToken",
+        "isDevelop",
+        "deviceManufacturer",
+        "deviceModelName",
+        "osVersion",
+        "deviceId",
+        "macAddress"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-customer-device/mobile/public/v1/customers/device-installations",
+      "path_parameters": [],
+      "query_parameters": [
+        "action"
+      ],
+      "source": "gb0/a.java",
+      "line": 17,
+      "body_type": "EntrypointParamsBodyRaw",
+      "body_fields": [
+        "appVersionCode",
+        "installationId",
+        "appId",
+        "appVersion",
+        "platform",
+        "pushToken",
+        "isDevelop",
+        "deviceManufacturer",
+        "deviceModelName",
+        "osVersion",
+        "deviceId",
+        "macAddress"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-payment/mobile/v1/payment",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "h00/e.java",
+      "line": 17,
+      "body_type": "PaymentValueRaw",
+      "body_fields": [
+        "paymentValue",
+        "saveCard",
+        "bindingId",
+        "placeId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-payment/mobile/v1/payment/sbp",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "h00/h.java",
+      "line": 18,
+      "body_type": "SbpPaymentValueRaw",
+      "body_fields": [
+        "paymentValue",
+        "placeId",
+        "returnUrl"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-camera/mobile/v1/places/{placeId}/cameras/{cameraId}/software-update",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "h30/a.java",
+      "line": 12
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/sensitivity/{sensitivityValue}",
+      "path_parameters": [
+        "placeId",
+        "cameraId",
+        "sensitivityValue"
+      ],
+      "query_parameters": [],
+      "source": "ix/d.java",
+      "line": 15
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/motionDetectionParameters",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "ix/d.java",
+      "line": 18
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v2/forpost/cameras/{cameraId}/events",
+      "path_parameters": [
+        "cameraId"
+      ],
+      "query_parameters": [
+        "UpperDate",
+        "LowerDate",
+        "Count",
+        "orderByTime"
+      ],
+      "source": "j50/a.java",
+      "line": 17
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-camera-personal/mobile/v1/cameras/{cameraId}/events",
+      "path_parameters": [
+        "cameraId"
+      ],
+      "query_parameters": [
+        "UpperDate",
+        "LowerDate",
+        "Count",
+        "orderByTime"
+      ],
+      "source": "j50/a.java",
+      "line": 20
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-camera/mobile/v1/places/{placeId}/cameras/features/info",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "j50/b.java",
+      "line": 13
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/vases",
+      "path_parameters": [],
+      "query_parameters": [
+        "vasId",
+        "advId"
+      ],
+      "source": "jc0/a.java",
+      "line": 16
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-auth/mobile/v1/address",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 26
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-auth/mobile/v1/customers",
+      "path_parameters": [],
+      "query_parameters": [
+        "contractNumber"
+      ],
+      "source": "ko/a.java",
+      "line": 29
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-auth/mobile/v1/address",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 32,
+      "body_type": "NewAddressRaw",
+      "body_fields": [
+        "regionId",
+        "streetId",
+        "houseId",
+        "apt"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-auth/mobile/v1/address/cities",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 35
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-auth/mobile/v1/customers/{customerId}",
+      "path_parameters": [
+        "customerId"
+      ],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 38
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/subscriberinvites",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 41,
+      "body_type": "InviteRaw",
+      "body_fields": []
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-auth/mobile/v1/address/additional",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 44
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-auth/mobile/v1/address/cities/{cityId}/streets/{streetId}/houses",
+      "path_parameters": [
+        "cityId",
+        "streetId"
+      ],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 47
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-auth/mobile/v1/address/cities/{cityId}/streets",
+      "path_parameters": [
+        "cityId"
+      ],
+      "query_parameters": [],
+      "source": "ko/a.java",
+      "line": 50
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/accesscontrols",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "la0/a.java",
+      "line": 13
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/mh-access-key/mobile/v1/rest/v1/access-keys",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "lj/a.java",
+      "line": 23,
+      "body_type": "DeleteAccessKeyDataRaw",
+      "body_fields": [
+        "customerServiceId",
+        "placeId",
+        "accessKeyCode"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-access-key/mobile/v1/rest/v1/access-keys/{keyServiceId}/reactivate",
+      "path_parameters": [
+        "keyServiceId"
+      ],
+      "query_parameters": [],
+      "source": "lj/a.java",
+      "line": 26,
+      "body_type": "AccessKeyDataRaw",
+      "body_fields": [
+        "accessKeyCode",
+        "placeId"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/confirmation/by-key",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [
+        "keyCode"
+      ],
+      "source": "lj/a.java",
+      "line": 29
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-access-key/mobile/v1/rest/v1/access-keys/{keyId}/notification-status",
+      "path_parameters": [
+        "keyId"
+      ],
+      "query_parameters": [],
+      "source": "lj/a.java",
+      "line": 32
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-access-key/mobile/v1/rest/v1/access-keys/{keyServiceId}/rename",
+      "path_parameters": [
+        "keyServiceId"
+      ],
+      "query_parameters": [],
+      "source": "lj/a.java",
+      "line": 35,
+      "body_type": "RenameBodyRaw",
+      "body_fields": [
+        "name"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/accesscontrols/activations",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "lj/a.java",
+      "line": 38,
+      "body_type": "ActivationBodyRaw",
+      "body_fields": [
+        "tariffId",
+        "documentsId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-access-key/mobile/v1/rest/v1/access-keys",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "lj/a.java",
+      "line": 41,
+      "body_type": "AccessKeyDataRaw",
+      "body_fields": [
+        "accessKeyCode",
+        "placeId"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-access-key/mobile/v1/rest/v1/access-keys/{keyCode}",
+      "path_parameters": [
+        "keyCode"
+      ],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "lj/a.java",
+      "line": 44
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-temp-pass/mobile/v1/rest/v1/temp-passes/access-controls",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "lj/b.java",
+      "line": 21
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-temp-pass/mobile/v1/rest/v1/temp-passes/time-to-life",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "lj/b.java",
+      "line": 24
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-temp-pass/mobile/v1/rest/v1/temp-passes",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "lj/b.java",
+      "line": 27,
+      "body_type": "CreateTempPassRequestRaw",
+      "body_fields": [
+        "placeId",
+        "ttl",
+        "accessControlIds"
+      ]
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/mh-temp-pass/mobile/v1/rest/v1/temp-passes/{id}",
+      "path_parameters": [
+        "id"
+      ],
+      "query_parameters": [],
+      "source": "lj/b.java",
+      "line": 30,
+      "body_type": "DeleteTempPassRequestRaw",
+      "body_fields": [
+        "placeId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/subscribers/event-params",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "mz/a.java",
+      "line": 15,
+      "body_type": "List"
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/subscribers/event-params",
+      "path_parameters": [],
+      "query_parameters": [
+        "sourceType",
+        "sourceId"
+      ],
+      "source": "mz/a.java",
+      "line": 18
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-customer-communication/mobile/v1/communications/metrics",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "n30/e.java",
+      "line": 12,
+      "body_type": "StoryEventsRaw",
+      "body_fields": [
+        "appVersionCode",
+        "platform",
+        "externalId",
+        "placeId",
+        "storyStatus"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-access-key/mobile/v1/rest/v1/access-keys",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "na0/a.java",
+      "line": 14
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/recordmode/{recordMode}",
+      "path_parameters": [
+        "placeId",
+        "cameraId",
+        "recordMode"
+      ],
+      "query_parameters": [],
+      "source": "ns/e.java",
+      "line": 14
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "ns/e.java",
+      "line": 17,
+      "body_type": "RenameCameraRaw",
+      "body_fields": [
+        "name"
+      ]
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-camera-personal/mobile/v1/cameras/{cameraId}/event-record-mode/{eventRecordMode}",
+      "path_parameters": [
+        "cameraId",
+        "eventRecordMode"
+      ],
+      "query_parameters": [],
+      "source": "ns/e.java",
+      "line": 20
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-technical-request/mobile/v1/requests",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId",
+        "page"
+      ],
+      "source": "nw/a.java",
+      "line": 14
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/interfaces",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "o60/a.java",
+      "line": 16
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/networks",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "o60/a.java",
+      "line": 19
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/actions",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "o60/a.java",
+      "line": 22,
+      "body_type": "UpdateWifiActionRaw",
+      "body_fields": [
+        "name",
+        "data"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/forpost/cameras/{cameraId}/devices/{deviceId}/open",
+      "path_parameters": [
+        "cameraId",
+        "deviceId"
+      ],
+      "query_parameters": [],
+      "source": "o90/a.java",
+      "line": 15
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/accesscontrols/{accessControlId}/entrances/{entranceId}/actions",
+      "path_parameters": [
+        "placeId",
+        "accessControlId",
+        "entranceId"
+      ],
+      "query_parameters": [],
+      "source": "o90/a.java",
+      "line": 18,
+      "body_type": "ActionRaw",
+      "body_fields": [
+        "name"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/accesscontrols/{accessControlId}/actions",
+      "path_parameters": [
+        "placeId",
+        "accessControlId"
+      ],
+      "query_parameters": [],
+      "source": "o90/a.java",
+      "line": 21,
+      "body_type": "ActionRaw",
+      "body_fields": [
+        "name"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-payment/mobile/v1/finance",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "oa0/a.java",
+      "line": 14
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-camera-personal/mobile/v1/video/refresh-user-session",
+      "path_parameters": [],
+      "query_parameters": [
+        "externalCameraId"
+      ],
+      "source": "oc0/a.java",
+      "line": 16
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/forpost/cameras/{cameraId}/video",
+      "path_parameters": [
+        "cameraId"
+      ],
+      "query_parameters": [
+        "LightStream",
+        "Format"
+      ],
+      "source": "oc0/a.java",
+      "line": 19
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/forpost/cameras/{cameraId}/video",
+      "path_parameters": [
+        "cameraId"
+      ],
+      "query_parameters": [
+        "TS",
+        "TZ",
+        "LightStream",
+        "Format",
+        "Speed"
+      ],
+      "source": "oc0/a.java",
+      "line": 22
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/events/search",
+      "path_parameters": [],
+      "query_parameters": [
+        "page",
+        "sort"
+      ],
+      "source": "ot/a.java",
+      "line": 14,
+      "body_type": "EventSearchRequestBodyRaw",
+      "body_fields": [
+        "placeIds",
+        "occurredAtFrom",
+        "occurredAtTo",
+        "sources",
+        "eventTypes"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-documents/mobile/v1/documents",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "p80/a.java",
+      "line": 18
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-documents/mobile/v1/documents/{id}",
+      "path_parameters": [
+        "id"
+      ],
+      "query_parameters": [],
+      "source": "p80/a.java",
+      "line": 21
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/temporal-codes",
+      "path_parameters": [],
+      "query_parameters": [
+        "accessControlIds"
+      ],
+      "source": "p90/a.java",
+      "line": 14
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v2/places/{placeId}/public/cameras",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "ra0/a.java",
+      "line": 13
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-camera-personal/mobile/v1/cameras/creation/{creationId}",
+      "path_parameters": [
+        "creationId"
+      ],
+      "query_parameters": [],
+      "source": "rl/a.java",
+      "line": 17
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-camera-personal/mobile/v1/cameras/wifi/{requestId}",
+      "path_parameters": [
+        "requestId"
+      ],
+      "query_parameters": [],
+      "source": "rl/a.java",
+      "line": 20
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-camera-personal/mobile/v1/cameras/{cameraId}/wifi",
+      "path_parameters": [
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "rl/a.java",
+      "line": 23,
+      "body_type": "ReAddCameraInfoRaw",
+      "body_fields": [
+        "activationCode",
+        "modelId",
+        "placeId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-camera-personal/mobile/v1/cameras/creation",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "rl/a.java",
+      "line": 26,
+      "body_type": "AddCameraInfoRaw",
+      "body_fields": [
+        "activationCode",
+        "modelId",
+        "placeId",
+        "tariff",
+        "connectionType"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-genesys-chat-support/mobile/v1/index",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "rq/b.java",
+      "line": 12
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/screen-sections",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "sa0/a.java",
+      "line": 13
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-payment/mobile/v1/payment/info",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "se/a.java",
+      "line": 13
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-payment/mobile/v1/payment/auto",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "sz/a.java",
+      "line": 18,
+      "body_type": "AutoPaymentRaw",
+      "body_fields": [
+        "autoPayDay",
+        "bindingId",
+        "placeId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-customer/mobile/v1/customers/places/{placeId}/settings/screens",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "tu/a.java",
+      "line": 15,
+      "body_type": "List"
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-technical-request/mobile/v1/requests",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "u10/c.java",
+      "line": 14,
+      "body_type": "HouseIssueReportRaw",
+      "body_fields": [
+        "phone",
+        "fio",
+        "message",
+        "placeId"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/subscribers/issues/submit",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "u10/c.java",
+      "line": 17,
+      "body_type": "AppIssueReportRaw",
+      "body_fields": [
+        "city",
+        "address",
+        "phone",
+        "email",
+        "name",
+        "description"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/cameras",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "ua0/a.java",
+      "line": 13
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-customer/mobile/v1/customers/places/{place_id}/settings/do_not_disturb",
+      "path_parameters": [
+        "place_id"
+      ],
+      "query_parameters": [],
+      "source": "vs/a.java",
+      "line": 17,
+      "body_type": "List"
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-customer/mobile/v1/customers/places/{place_id}/settings/do_not_disturb",
+      "path_parameters": [
+        "place_id"
+      ],
+      "query_parameters": [],
+      "source": "vs/a.java",
+      "line": 20
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-documents/mobile/v1/documents",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId"
+      ],
+      "source": "wa0/a.java",
+      "line": 15
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/current-tariff",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "x00/a.java",
+      "line": 20,
+      "body_type": "TariffRaw",
+      "body_fields": [
+        "orderId",
+        "tariffId",
+        "title",
+        "quota",
+        "resolution",
+        "recordType",
+        "price",
+        "description",
+        "allowedServices",
+        "selectedServices",
+        "discountPrice",
+        "discountDate"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-customer/mobile/v1/customers/places/{placeId}/settings/screens",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "xa0/a.java",
+      "line": 13
+    },
+    {
+      "method": "PUT",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/mirror/{mirrorValue}",
+      "path_parameters": [
+        "placeId",
+        "cameraId",
+        "mirrorValue"
+      ],
+      "query_parameters": [],
+      "source": "y10/a.java",
+      "line": 12
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/cameras/{cameraId}/ptz/rotate",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [
+        "direction",
+        "action"
+      ],
+      "source": "y10/d.java",
+      "line": 13
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/stomp/available-features",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "ya0/a.java",
+      "line": 12
+    },
+    {
+      "method": "GET",
+      "path": "/rest/v1/places/{placeId}/confirmation",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "yv/a.java",
+      "line": 15
+    },
+    {
+      "method": "POST",
+      "path": "/rest/v1/places/{placeId}/accesscontrols/activations",
+      "path_parameters": [
+        "placeId"
+      ],
+      "query_parameters": [],
+      "source": "yv/a.java",
+      "line": 18,
+      "body_type": "IntercomActivationDataRaw",
+      "body_fields": [
+        "tariffId",
+        "documentsId"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-in-app-market/mobile/v1/goods",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "z20/a.java",
+      "line": 14
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-camera-personal/mobile/v1/rest/v1/places/{placeId}/cameras/{cameraId}/audioVolumes",
+      "path_parameters": [
+        "placeId",
+        "cameraId"
+      ],
+      "query_parameters": [],
+      "source": "z50/a.java",
+      "line": 15
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-camera-personal/mobile/v1/rest/v1/places/{placeId}/cameras/{cameraId}/microphoneVolumes/{volume}",
+      "path_parameters": [
+        "placeId",
+        "cameraId",
+        "volume"
+      ],
+      "query_parameters": [],
+      "source": "z50/a.java",
+      "line": 18
+    },
+    {
+      "method": "PUT",
+      "path": "/api/mh-camera-personal/mobile/v1/rest/v1/places/{placeId}/cameras/{cameraId}/speakerVolumes/{volume}",
+      "path_parameters": [
+        "placeId",
+        "cameraId",
+        "volume"
+      ],
+      "query_parameters": [],
+      "source": "z50/a.java",
+      "line": 21
+    },
+    {
+      "method": "GET",
+      "path": "/api/mh-payment/mobile/v1/payment/cards",
+      "path_parameters": [],
+      "query_parameters": [],
+      "source": "za0/a.java",
+      "line": 12
+    },
+    {
+      "method": "POST",
+      "path": "/api/mh-auth/mobile/v1/guests/link",
+      "path_parameters": [],
+      "query_parameters": [
+        "placeId",
+        "app"
+      ],
+      "source": "zu/a.java",
+      "line": 13
+    }
+  ]
+}

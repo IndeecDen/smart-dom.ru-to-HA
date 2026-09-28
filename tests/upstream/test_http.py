@@ -1,0 +1,314 @@
+"""Tests for HTTP client behavior — security-critical:
+- Bearer не отправляется на pre-auth endpoints.
+- Error log не утекает PII (phone/contract/account id в auth URL).
+"""
+from __future__ import annotations
+
+import logging
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from aiohttp import ClientError
+
+from custom_components.my_dom_ru.http import HTTP
+
+
+class _FakeResponse:
+    """Минимальный stub aiohttp ClientResponse для тестов.
+
+    `url` — зеркало запрошенного, а не константа: иначе ветка auth-пути в
+    `_log_response` не исполняется ни разу, и редакция телефона в ней не
+    держится ничем. Именно эта строка пишется на КАЖДОМ auth-запросе,
+    включая успешный вход, — в отличие от строки отказа.
+    """
+
+    def __init__(self, status: int, url: str = "https://example/") -> None:
+        self.status = status
+        self.ok = 200 <= status < 300
+        self.reason = "OK" if self.ok else "Error"
+        self.headers: dict = {}
+        self.method = "GET"
+        self.url = url
+
+
+def _responder(status: int):
+    """Ответчик, чей `url` — зеркало запрошенного.
+
+    Константный URL в дублёре прятал от тестов ветку auth-пути в
+    `_log_response`: она не исполнялась ни разу, и редакция телефона в ней
+    не держалась ничем.
+    """
+
+    async def _call(url, **_kwargs):
+        return _FakeResponse(status, url)
+
+    return _call
+
+
+@pytest.fixture
+def fake_session() -> MagicMock:
+    """Подмена aiohttp session — захватывает headers для assert'ов."""
+    session = MagicMock()
+    session.get = AsyncMock(side_effect=_responder(200))
+    session.post = AsyncMock(side_effect=_responder(200))
+    return session
+
+
+@pytest.fixture
+def http_client(hass, fake_session, monkeypatch):
+    """HTTP client с подменённой aiohttp-сессией HA."""
+    monkeypatch.setattr(
+        "custom_components.my_dom_ru.http.async_get_clientsession",
+        lambda _hass: fake_session,
+    )
+    ua = MagicMock()
+    ua.__str__ = lambda self: "test-ua"
+    return HTTP(
+        hass=hass,
+        user_agent=ua,
+        access_token="EXPIRED_BEARER_TOKEN",
+        refresh_token=None,
+        operator="1",
+    )
+
+
+async def test_bearer_omitted_on_preauth_login(http_client, fake_session):
+    """Pre-auth /auth/v2/login/{phone} не должен получать Authorization header,
+    даже если access_token присутствует. Иначе backend видит expired Bearer
+    и отдаёт 401 — блокируя reauth flow."""
+    await http_client.get("/auth/v2/login/1131686")
+
+    fake_session.get.assert_awaited_once()
+    sent_headers = fake_session.get.await_args.kwargs["headers"]
+    assert "authorization" not in {k.lower() for k in sent_headers}
+
+
+async def test_bearer_omitted_on_preauth_password(http_client, fake_session):
+    """Pre-auth /auth/v2/auth/{phone}/password — то же, без Bearer."""
+    await http_client.post("/auth/v2/auth/1131686/password", '{"login": "x"}')
+
+    fake_session.post.assert_awaited_once()
+    sent_headers = fake_session.post.await_args.kwargs["headers"]
+    assert "authorization" not in {k.lower() for k in sent_headers}
+
+
+async def test_bearer_omitted_on_public_device_installation(http_client, fake_session):
+    """Public bootstrap 9.9.0 вызывается до auth и не получает Bearer."""
+    await http_client.post(
+        "/api/mh-customer-device/mobile/public/v1/customers/device-installations",
+        '{"appVersion": "9.9.0"}',
+    )
+
+    sent_headers = fake_session.post.await_args.kwargs["headers"]
+    assert "authorization" not in {k.lower() for k in sent_headers}
+
+
+async def test_bearer_sent_on_post_auth_endpoint(http_client, fake_session):
+    """На post-auth endpoint Bearer должен быть отправлен."""
+    await http_client.get("/rest/v1/places/12345/accesscontrols")
+
+    sent_headers = fake_session.get.await_args.kwargs["headers"]
+    assert sent_headers.get("authorization") == "Bearer EXPIRED_BEARER_TOKEN"
+
+
+async def test_bearer_does_not_leak_across_requests(http_client, fake_session):
+    """Регрессия: после post-auth запроса (где Authorization добавлен)
+    следующий pre-auth запрос НЕ должен унаследовать Authorization.
+    Корень bug'а — общий self._headers между запросами."""
+    # Запрос #1 — post-auth, Bearer должен быть.
+    await http_client.get("/rest/v1/places/12345/accesscontrols")
+    first_headers = fake_session.get.await_args.kwargs["headers"]
+    assert "authorization" in first_headers
+
+    # Запрос #2 — pre-auth, Bearer НЕ должен утечь.
+    await http_client.get("/auth/v2/login/1131686")
+    second_headers = fake_session.get.await_args.kwargs["headers"]
+    assert "authorization" not in {k.lower() for k in second_headers}
+
+
+async def test_error_log_redacts_phone_in_auth_path(http_client, fake_session, caplog):
+    """Лог отказа не должен содержать PII из auth URL.
+
+    Уровень — `debug`: транспорт не решает, значим ли отказ (см. тест про
+    устойчивый отказ ниже). Редакция телефона от уровня не зависит и нужна
+    тем более: именно debug-логи люди прикладывают к issue.
+    """
+    fake_session.get = AsyncMock(side_effect=_responder(401))
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.my_dom_ru.const"):
+        with pytest.raises(Exception):
+            await http_client.get("/auth/v2/login/1131686")
+
+    assert "1131686" not in caplog.text
+    assert "/auth/v2/login/***" in caplog.text
+
+
+async def test_error_log_passes_through_non_auth_path(http_client, fake_session, caplog):
+    """Для не-auth endpoint path логируется как есть (place_id и т.д. — не PII)."""
+    fake_session.get = AsyncMock(side_effect=_responder(500))
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.my_dom_ru.const"):
+        with pytest.raises(Exception):
+            await http_client.get("/rest/v1/places/12345/accesscontrols")
+
+    assert "/rest/v1/places/12345/accesscontrols" in caplog.text
+
+
+# --- A-21: explicit ClientTimeout on operator API -------------------------- #
+
+
+async def test_rest_get_uses_rest_timeout(http_client, fake_session):
+    """GET (JSON) идёт с REST-таймаутом (total=30, connect=10), не с aiohttp-дефолтом."""
+    from custom_components.my_dom_ru.http import _REST_TIMEOUT
+
+    await http_client.get("/rest/v1/places/12345/accesscontrols")
+
+    timeout = fake_session.get.await_args.kwargs["timeout"]
+    assert timeout is _REST_TIMEOUT
+    assert timeout.total == 30
+    assert timeout.connect == 10
+
+
+async def test_post_uses_rest_timeout(http_client, fake_session):
+    """POST также получает REST-таймаут."""
+    from custom_components.my_dom_ru.http import _REST_TIMEOUT
+
+    await http_client.post("/rest/v1/something", '{"x": 1}')
+
+    assert fake_session.post.await_args.kwargs["timeout"] is _REST_TIMEOUT
+
+
+async def test_delete_uses_rest_timeout(http_client, fake_session):
+    """DELETE получает REST-таймаут."""
+    from custom_components.my_dom_ru.http import _REST_TIMEOUT
+
+    fake_session.delete = AsyncMock(return_value=_FakeResponse(200))
+    await http_client.delete("/rest/v1/something", '{"x": 1}')
+
+    assert fake_session.delete.await_args.kwargs["timeout"] is _REST_TIMEOUT
+
+
+async def test_binary_error_body_is_not_returned_as_data(http_client, fake_session):
+    """Тело ошибки оператора не уходит вызывающему как «данные».
+
+    Бинарный путь возвращал содержимое любого ответа. На `531`/`500` это были
+    непустые байты JSON-ошибки, и потребитель снимка принимал их за кадр.
+    """
+    resp = _FakeResponse(531)
+    resp.read = AsyncMock(return_value=b'{"error":"camera busy"}')
+    fake_session.get = AsyncMock(return_value=resp)
+
+    with pytest.raises(ClientError):
+        await http_client.get("/rest/v1/cameras/1/snapshot", binary=True)
+
+
+async def test_binary_get_uses_binary_timeout(http_client, fake_session):
+    """Binary-чтение (snapshot JPEG) идёт с более щедрым binary-таймаутом (total=60)."""
+    from custom_components.my_dom_ru.http import _BINARY_TIMEOUT
+
+    resp = MagicMock()
+    resp.read = AsyncMock(return_value=b"jpmdr-bytes")
+    fake_session.get = AsyncMock(return_value=resp)
+
+    result = await http_client.get("/rest/v1/cameras/1/snapshot", binary=True)
+
+    assert result == b"jpmdr-bytes"
+    timeout = fake_session.get.await_args.kwargs["timeout"]
+    assert timeout is _BINARY_TIMEOUT
+    assert timeout.total == 60
+
+
+async def test_non_auth_response_is_logged_with_its_status(
+    http_client, fake_session, caplog
+) -> None:
+    """Обычный ответ логируется статусом, без тела и заголовков."""
+    import logging
+
+    fake_session.get = AsyncMock(return_value=_FakeResponse(200))
+
+    with caplog.at_level(logging.DEBUG):
+        await http_client.get("/rest/v1/places")
+
+    assert any("Response" in r.msg for r in caplog.records)
+
+
+async def test_post_body_size_is_logged_not_the_body(
+    http_client, fake_session, caplog
+) -> None:
+    """В журнал уходит размер тела, а не само тело.
+
+    В теле лежат пароль и код из SMS — писать его нельзя даже на отладке.
+    """
+    import logging
+
+    fake_session.post = AsyncMock(return_value=_FakeResponse(200))
+
+    with caplog.at_level(logging.DEBUG):
+        await http_client.post("/auth/v2/auth/x/password", '{"hash1": "СЕКРЕТ"}')
+
+    assert not any("СЕКРЕТ" in str(r.msg) % (r.args or ()) for r in caplog.records)
+
+
+async def test_auth_response_is_logged_without_its_size(
+    http_client, fake_session, caplog
+) -> None:
+    """У ответа на вход не логируется даже размер.
+
+    По размеру видно, чем кончилась попытка входа: успех и отказ различаются
+    длиной тела.
+    """
+    import logging
+
+    fake_session.post = AsyncMock(return_value=_FakeResponse(200))
+
+    with caplog.at_level(logging.DEBUG):
+        await http_client.post("/auth/v2/auth/x/password", "{}")
+
+    responses = [r for r in caplog.records if "Response" in str(r.msg)]
+    assert responses, "ответ должен попасть в журнал"
+    assert not any("Content-Length" in str(r.msg) for r in responses)
+
+
+async def test_binary_body_size_is_measured_without_decoding(
+    http_client, fake_session, caplog
+) -> None:
+    """Двоичное тело измеряется как есть, без попытки его прочитать текстом."""
+    import logging
+
+    fake_session.post = AsyncMock(return_value=_FakeResponse(200))
+
+    with caplog.at_level(logging.DEBUG):
+        await http_client.post("/rest/v1/upload", b"\xff\xd8\x00\x01")
+
+    assert any("Request" in str(r.msg) for r in caplog.records)
+
+
+async def test_persistent_rest_failure_is_not_shouted_on_every_response(
+    http_client, fake_session, caplog
+) -> None:
+    """Устойчивый отказ REST не даёт по громкой строке на каждый ответ.
+
+    Транспорт не знает, значим ли отказ: решает вызывающий — координатор
+    ограничивает жалобу по фронту, config flow показывает причину в форме.
+    На `error` эта строка сводила дедупликацию на нет: при отказе оператора
+    набегало под три сотни одинаковых записей в сутки на каждый endpoint,
+    против правила Silver `log-when-unavailable`.
+    """
+    import logging
+
+    fake_session.get = AsyncMock(side_effect=_responder(503))
+
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(12):
+            with pytest.raises(ClientError):
+                await http_client.get("/rest/v1/subscriber-places")
+
+    ours = [
+        r for r in caplog.records
+        if r.name.startswith("custom_components.my_dom_ru")
+        and "API request failed" in r.msg
+    ]
+    assert [r for r in ours if r.levelno >= logging.WARNING] == [], (
+        "об отказе решает вызывающий, а не транспорт"
+    )
+    assert len(ours) == 12, "на debug отказ виден — иначе диагностировать нечем"

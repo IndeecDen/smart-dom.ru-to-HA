@@ -1,0 +1,82 @@
+name: Bug report
+description: Проблема с интеграцией «Умный Дом.ру»
+title: "[BUG] "
+labels: bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за отчёт. Перед заполнением прочитайте
+        [docs/FEATURES.md](../blob/main/docs/FEATURES.md): возможно, функция
+        ещё не реализована намеренно.
+
+  - type: warning
+    attributes:
+      value: |
+        **Не прикрепляйте** пароли, коды из SMS, access/refresh-токены, коды
+        электронных ключей, ссылки временных пропусков, HAR-записи, APK/APKM,
+        экспорт `.storage` и полные логи. Используйте кнопку «Загрузить
+        диагностику» в UI интеграции — она редактирует секреты.
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия интеграции
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: ha-version
+    attributes:
+      label: Версия Home Assistant и способ установки
+      placeholder: "2026.9.0, Home Assistant OS / Container / Supervised / Core"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Область
+      options:
+        - Вход в облако, refresh токена
+        - Домофон, открытие двери
+        - Камеры, поток, снимок
+        - Входящий звонок, звук, микрофон
+        - Архив, история событий
+        - Действия (пропуски, ключи, настройки камер)
+        - Установка, HACS, обновление
+        - Другое
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Что произошло
+      description: Опишите шаги и фактический результат.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что ожидалось
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Код HTTP или выдержка из лога
+      description: Только относящаяся к делу строка, без секретов.
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Отредактированная диагностика
+      description: Содержимое файла из «Загрузить диагностику» в UI интеграции.
+    validations:
+      required: false

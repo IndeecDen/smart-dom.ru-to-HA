@@ -1,0 +1,328 @@
+"""Regression tests for cross-tool AIDD operational contracts."""
+
+from __future__ import annotations
+
+import subprocess
+import tomllib
+
+import yaml
+from pathlib import Path
+
+import pytest
+
+import custom_components.my_dom_ru  # noqa: F401  # load patch targets
+
+
+REPO_ROOT = Path(__file__).parents[2]
+CANONICAL_ROLES = REPO_ROOT / ".agents/roles"
+CANONICAL_COMMANDS = REPO_ROOT / ".agents/commands"
+CANONICAL_RULES = REPO_ROOT / ".agents/rules"
+
+
+def _read(relative_path: str) -> str:
+    return (REPO_ROOT / relative_path).read_text()
+
+
+def _role_names(directory: Path, suffix: str) -> set[str]:
+    return {
+        path.name.removesuffix(suffix)
+        for path in directory.glob(f"*{suffix}")
+        if path.name != "README.md"
+    }
+
+
+def _frontmatter_value(text: str, key: str) -> str | None:
+    """Вернуть значение поля из YAML frontmatter markdown-файла."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() in ("---", "..."):
+            break
+        name, separator, value = line.partition(":")
+        if separator and name.strip() == key:
+            return value.strip()
+    return None
+
+
+def test_tool_role_adapters_match_canonical_roles() -> None:
+    canonical = _role_names(CANONICAL_ROLES, ".md")
+    claude = _role_names(REPO_ROOT / ".claude/agents", ".md")
+    codex = _role_names(REPO_ROOT / ".codex/agents", ".toml")
+
+    assert canonical
+    assert claude == canonical
+    assert codex == canonical
+
+
+def test_tool_command_adapters_match_canonical_commands() -> None:
+    canonical = _role_names(CANONICAL_COMMANDS, ".md")
+    claude = _role_names(REPO_ROOT / ".claude/commands", ".md")
+    skills = {
+        path.parent.name.removeprefix("source-command-")
+        for path in (REPO_ROOT / ".agents/skills").glob(
+            "source-command-*/SKILL.md"
+        )
+    }
+
+    assert canonical
+    assert claude == canonical
+    assert skills == canonical
+
+
+def test_claude_rule_adapters_match_canonical_rules() -> None:
+    canonical = _role_names(CANONICAL_RULES, ".md")
+    claude = _role_names(REPO_ROOT / ".claude/rules", ".md")
+
+    assert canonical
+    assert claude == canonical
+    for rule_name in canonical:
+        adapter = _read(f".claude/rules/{rule_name}.md")
+        assert f".agents/rules/{rule_name}.md" in adapter
+        assert len(adapter.splitlines()) <= 16
+
+
+@pytest.mark.parametrize(
+    "role_name",
+    sorted(_role_names(CANONICAL_ROLES, ".md")),
+)
+def test_role_adapters_are_thin_and_point_to_canonical_role(
+    role_name: str,
+) -> None:
+    canonical_path = f".agents/roles/{role_name}.md"
+    claude_text = _read(f".claude/agents/{role_name}.md")
+    codex_path = REPO_ROOT / f".codex/agents/{role_name}.toml"
+    codex_text = codex_path.read_text()
+    codex_config = tomllib.loads(codex_text)
+
+    assert canonical_path in claude_text
+    assert canonical_path in codex_config["developer_instructions"]
+    assert "AGENTS.md" in claude_text
+    assert "AGENTS.md" in codex_config["developer_instructions"]
+    assert len(claude_text.splitlines()) <= 10
+    assert len(codex_text.splitlines()) <= 8
+
+
+def test_release_check_is_bound_to_candidate_sha() -> None:
+    text = _read(".agents/commands/release-check.md")
+
+    assert "headRefOid" in text
+    assert "git rev-parse HEAD" in text
+    assert "gh pr checks --watch" in text
+    assert "gh run list --branch master" not in text
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ".agents/commands/git-cleanup.md",
+        ".agents/commands/docs-update.md",
+    ),
+)
+def test_operational_commands_support_target_ref(relative_path: str) -> None:
+    text = _read(relative_path)
+
+    assert "<target-ref>" in text
+    assert "merge-base HEAD master" not in text
+    assert "master..HEAD" not in text
+
+
+@pytest.mark.parametrize(
+    "command_name",
+    sorted(_role_names(CANONICAL_COMMANDS, ".md")),
+)
+def test_command_adapters_delegate_without_copying_procedure(
+    command_name: str,
+) -> None:
+    canonical_path = f".agents/commands/{command_name}.md"
+    claude_text = _read(f".claude/commands/{command_name}.md")
+    skill_text = _read(
+        f".agents/skills/source-command-{command_name}/SKILL.md"
+    )
+
+    assert canonical_path in claude_text
+    assert canonical_path in skill_text
+    assert len(claude_text.splitlines()) <= 9
+    assert len(skill_text.splitlines()) <= 10
+
+
+@pytest.mark.parametrize(
+    "role_name",
+    (
+        "code-reviewer",
+        "docs-keeper",
+        "ha-expert",
+        "qa-engineer",
+        "security-auditor",
+    ),
+)
+def test_final_reviewer_roles_share_candidate_invariants(
+    role_name: str,
+) -> None:
+    text = _read(f".agents/roles/{role_name}.md")
+
+    assert "base/head/tree" in text
+    assert "Participated in implementation: no" in text
+    assert "Critical/Important" in text
+    assert "delta-scoped" in text
+    assert "кажд" in text
+
+
+def _tracked_files(root: Path) -> list[Path]:
+    """Файлы под `root`: и версионируемые, и ещё не добавленные в индекс."""
+    listing = subprocess.run(
+        # --others --exclude-standard: новый адаптер проверяется ещё до
+        # добавления в индекс, а gitignore отсекает рабочий мусор — локальные
+        # worktree агентов и кеши.
+        [
+            "git",
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            str(root.relative_to(REPO_ROOT)),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [
+        REPO_ROOT / name for name in listing.stdout.split("\0") if name
+    ]
+
+
+def test_instruction_adapters_have_no_parent_relative_markdown_paths() -> None:
+    roots = (
+        REPO_ROOT / ".agents",
+        REPO_ROOT / ".claude",
+        REPO_ROOT / ".codex",
+        REPO_ROOT / ".cursor",
+    )
+    files = [REPO_ROOT / ".github/copilot-instructions.md"]
+    for root in roots:
+        tracked = _tracked_files(root)
+        # Проверять по каталогу: общий список заполнен ещё до цикла, поэтому
+        # `assert files` пропустил бы пустой листинг любого из корней.
+        assert tracked, f"листинг {root.relative_to(REPO_ROOT)} пуст"
+        files.extend(tracked)
+
+    for path in files:
+        if path.suffix not in {".md", ".mdc", ".toml"}:
+            continue
+        assert "](../" not in path.read_text(), path.relative_to(REPO_ROOT)
+
+
+def test_claude_imports_repository_contract() -> None:
+    text = _read("CLAUDE.md")
+
+    assert "@AGENTS.md" in text
+    assert "## Boundaries" not in text
+
+
+def test_hook_launchers_delegate_to_canonical_implementations() -> None:
+    for tool_name in (".claude", ".codex"):
+        adapters = sorted((REPO_ROOT / tool_name / "hooks").glob("*.sh"))
+        assert adapters, f"{tool_name}/hooks пуст — проверка была бы холостой"
+        for adapter in adapters:
+            text = adapter.read_text()
+            canonical_path = f".agents/hooks/{adapter.name}"
+            assert (REPO_ROOT / canonical_path).is_file()
+            assert canonical_path in text
+            assert len(text.splitlines()) <= 10
+
+    python_adapter = _read(".codex/hooks/check-secret-logs.py")
+    assert '".agents" / "hooks" / "check-secret-logs.py"' in python_adapter
+    assert len(python_adapter.splitlines()) <= 12
+
+
+def test_plans_are_tool_independent() -> None:
+    plans = sorted((REPO_ROOT / "docs/plans").glob("*.md"))
+    assert plans, "docs/plans пуст — проверка была бы холостой"
+    for plan in plans:
+        if plan.name == "README.md":
+            continue
+        assert "superpowers:" not in plan.read_text(), plan
+
+
+def test_live_hook_docs_use_canonical_implementation() -> None:
+    text = "\n".join(
+        (
+            _read("docs/aidd/mcp-tools.md"),
+            _read("docs/roadmap.md"),
+            _read(".claude/README.md"),
+        )
+    )
+
+    assert "pre-commit-redaction-check.sh" not in text
+    assert ".agents/hooks/check-secret-logs.sh" in text
+
+
+@pytest.mark.parametrize("role", sorted(_role_names(CANONICAL_ROLES, ".md")))
+def test_role_description_is_written_once_in_the_canonical_role(role: str) -> None:
+    """`description` пишется только в каноне, адаптеры копируют его дословно.
+
+    Инструменты читают это поле буквально — Claude по нему выбирает субагента,
+    Codex подставляет в профиль, — поэтому ссылкой на канон его заменить
+    нельзя. Единственная защита от расхождения — сверка (ADR-0016 §4).
+    Подробное правило маршрутизации живёт в каноническом `use_when` и в
+    адаптеры не копируется.
+    """
+    canonical = _frontmatter_value(_read(f".agents/roles/{role}.md"), "description")
+    claude = _frontmatter_value(_read(f".claude/agents/{role}.md"), "description")
+    codex = tomllib.loads(_read(f".codex/agents/{role}.toml")).get("description")
+
+    assert canonical, f"в каноне роли {role} нет description"
+    assert claude == canonical, (
+        f"Claude adapter для {role} разошёлся с каноном.\n"
+        f"канон:   {canonical}\nадаптер: {claude}"
+    )
+    assert codex == canonical, (
+        f"Codex adapter для {role} разошёлся с каноном.\n"
+        f"канон:   {canonical}\nадаптер: {codex}"
+    )
+
+
+@pytest.mark.parametrize("role", sorted(_role_names(CANONICAL_ROLES, ".md")))
+def test_canonical_role_keeps_routing_hint_out_of_adapters(role: str) -> None:
+    """Подробное «когда применять» остаётся в каноне и не течёт в адаптеры."""
+    canonical_text = _read(f".agents/roles/{role}.md")
+    use_when = _frontmatter_value(canonical_text, "use_when")
+
+    assert use_when, (
+        f"у роли {role} нет use_when — правило маршрутизации должно быть "
+        "записано в каноне, а не растворяться в description адаптеров"
+    )
+    assert use_when not in _read(f".claude/agents/{role}.md")
+    assert use_when not in _read(f".codex/agents/{role}.toml")
+
+
+def test_pyright_job_types_against_current_matrix_core() -> None:
+    """Job `pyright` типизирует против того же ядра, что и current-плечо.
+
+    Половина гейта из A-100 статическая: pyright видит `via_device` в
+    `DeviceInfo` только на 2026.9. Если версии разъедутся, эта половина тихо
+    перестанет соответствовать прогоняемому ядру. GitHub не раскрывает `env`
+    внутри `strategy`, поэтому пин продублирован руками — сверяем дубль и то,
+    что job действительно берёт его из `env`, а не из своего литерала.
+    """
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/python-tests.yaml").read_text()
+    )
+
+    env_pin = workflow["env"]["PHC_CURRENT"]
+    arms = workflow["jobs"]["pytest"]["strategy"]["matrix"]["include"]
+    current = [arm for arm in arms if "current" in arm["ha-label"]]
+
+    assert len(current) == 1, f"ожидалось одно current-плечо, найдено {len(current)}"
+    assert current[0]["phc-version"] == env_pin, (
+        f"pyright типизирует против {env_pin}, "
+        f"а current-плечо матрицы — {current[0]['phc-version']}"
+    )
+
+    # Равенство бессмысленно, если сам job берёт версию не из `env`.
+    steps = workflow["jobs"]["pyright"]["steps"]
+    installs = "\n".join(step.get("run", "") for step in steps)
+    assert "pytest-homeassistant-custom-component==${{ env.PHC_CURRENT }}" in installs

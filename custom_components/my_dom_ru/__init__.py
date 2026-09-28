@@ -1,0 +1,737 @@
+"""The Dom.ru Smart Home integration."""
+
+from __future__ import annotations
+import json
+from typing import Any, Final
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
+from homeassistant.helpers.device_registry import DeviceEntry
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.const import Platform
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.core import HomeAssistant, ServiceCall
+
+from .api import MyDomRuAPI
+from .app_services import async_register_app_services
+from .clip_proxy import async_release_clip_cache
+from .const import (
+    DOMAIN,
+    LOGGER,
+    CONF_ACCESS_TOKEN,
+    CONF_OPERATOR_ID,
+    CONF_REFRESH_TOKEN,
+    CONF_FCM_CREDENTIALS,
+    CONF_USER_AGENT,
+    CONF_USE_GO2RTC,
+    CONF_GO2RTC_BASE_URL,
+    CONF_GO2RTC_RTSP_HOST,
+    CONF_GO2RTC_USERNAME,
+    CONF_GO2RTC_PASSWORD,
+    DEFAULT_GO2RTC_BASE_URL,
+    DEFAULT_GO2RTC_RTSP_HOST,
+    STREAM_MANAGER_DATA,
+    SIGNAL_DOORBELL,
+    SIP_DATA as _SIP_DATA,
+)
+from .coordinator import MyDomRuConfigEntry, MyDomRuUpdateCoordinator
+from .entity_migration import async_migrate_entity_unique_ids, lock_unique_id
+from .fcm import (
+    DoorbellFcmListener,
+    async_create_fcm_repair_issue,
+    async_delete_fcm_repair_issue,
+)
+from .go2rtc import Go2RtcClient, go2rtc_auth_headers
+from .device import async_register_place_devices
+from .history import HistoryManager
+from .history_ws import async_register_history_ws_command
+from .sip.call_controller import DoorbellCallController, Go2RtcConfig
+from .stream_manager import CameraStreamManager
+from .uplink_ws import async_register_uplink_card, async_register_uplink_ws_command
+from .user_agent import UserAgent
+
+# Per-entry FCM ownership is private to this lifecycle module.
+_FCM_DATA: Final = f"{DOMAIN}_fcm_listeners"
+
+# Реестр SIP-контроллеров per-entry (`SIP_DATA` из const.py) — отдельный top-level
+# key: координатор с тех пор переехал в `entry.runtime_data`, а под этим ключом
+# остаются только вспомогательные реестры.
+SERVICE_ANSWER = "answer"
+SERVICE_HANGUP = "hangup"
+
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.CAMERA,
+    Platform.EVENT,
+    Platform.LOCK,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
+
+
+async def _async_register_fcm_listener(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    listener: DoorbellFcmListener,
+) -> bool:
+    """Claim per-entry FCM ownership without replacing a surviving receiver."""
+    registry = hass.data.setdefault(_FCM_DATA, {})
+    previous = registry.get(entry.entry_id)
+    if previous is not None and previous is not listener:
+        try:
+            stopped = await previous.async_stop()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "FCM: прежний listener не завершён (%s)",
+                type(err).__name__,
+            )
+            stopped = False
+        if not stopped:
+            async_create_fcm_repair_issue(hass, entry)
+            return False
+        if registry.get(entry.entry_id) is previous:
+            registry.pop(entry.entry_id)
+
+    registry[entry.entry_id] = listener
+
+    async def stop_and_release() -> None:
+        if await listener.async_stop() and registry.get(entry.entry_id) is listener:
+            registry.pop(entry.entry_id)
+
+    entry.async_on_unload(stop_and_release)
+    return True
+
+
+# Интеграция настраивается только через UI. Без этой схемы блок
+# `my_dom_ru:` в `configuration.yaml` молча игнорировался бы: теперь
+# HA скажет человеку, что YAML тут не читается.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Зарегистрировать действия интеграции один раз, до загрузки записей.
+
+    Правило Bronze `action-setup`: действие должно существовать даже когда
+    запись не загружена — иначе автоматизация, ссылающаяся на него, падает
+    при проверке с «сервис не найден», и человек не понимает, что дело в
+    недоступной интеграции, а не в его сценарии. Проверка живого вызова
+    живёт в самом хендлере и отвечает понятной ошибкой.
+    """
+    _async_register_sip_services(hass)
+    async_register_app_services(hass)
+    return True
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: MyDomRuConfigEntry
+) -> bool:
+    """Set up Dom.ru Smart Home from a config entry."""
+    coordinator = MyDomRuUpdateCoordinator(hass, entry=entry)
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data = coordinator
+
+    stream_manager: CameraStreamManager | None = None
+    use_go2rtc = entry.options.get(
+        CONF_USE_GO2RTC,
+        entry.data.get(CONF_USE_GO2RTC, False),
+    )
+    go2rtc_base_url = entry.options.get(
+        CONF_GO2RTC_BASE_URL,
+        entry.data.get(CONF_GO2RTC_BASE_URL),
+    )
+    go2rtc_rtsp_host = entry.options.get(
+        CONF_GO2RTC_RTSP_HOST,
+        entry.data.get(CONF_GO2RTC_RTSP_HOST),
+    )
+    if use_go2rtc and go2rtc_base_url and go2rtc_rtsp_host:
+        go2rtc_username = entry.options.get(
+            CONF_GO2RTC_USERNAME,
+            entry.data.get(CONF_GO2RTC_USERNAME),
+        )
+        go2rtc_password = entry.options.get(
+            CONF_GO2RTC_PASSWORD,
+            entry.data.get(CONF_GO2RTC_PASSWORD),
+        )
+        client = Go2RtcClient(
+            base_url=go2rtc_base_url,
+            rtsp_host=go2rtc_rtsp_host,
+            session=async_get_clientsession(hass),
+            username=go2rtc_username,
+            password=go2rtc_password,
+        )
+        stream_manager = CameraStreamManager(
+            hass=hass,
+            entry=entry,
+            coordinator=coordinator,
+            client=client,
+        )
+        hass.data.setdefault(STREAM_MANAGER_DATA, {})[
+            entry.entry_id
+        ] = stream_manager
+        entry.async_on_unload(stream_manager.async_stop)
+
+    # Slice 3c (A-12): legacy unique_id содержали динамический `name`.
+    # Мигрируем ДО forward_entry_setups, чтобы entity повторно регистрировались
+    # с новыми UID без появления дублей.
+    await async_migrate_entity_unique_ids(hass, entry, coordinator.data or {})
+
+    # HA-core гарантированно вызовет эти cleanup-функции на unload entry,
+    # независимо от успешности platform unload. См. audit A-16.
+    entry.async_on_unload(coordinator.async_unsubscribe)
+    entry.async_on_unload(entry.add_update_listener(async_update_options))
+
+    # Адреса регистрируются до платформ: сущности ссылаются на них через
+    # `via_device_id`, которому нужен готовый device_id.
+    async_register_place_devices(hass, entry, coordinator.data)
+
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Durable REST history is intentionally separate from the five-minute main
+    # coordinator. Event entities are already attached before the first silent
+    # baseline/poll, and the config-entry lifecycle owns both task and timer.
+    history_manager = HistoryManager(hass, entry.entry_id, coordinator)
+    entry.async_on_unload(history_manager.async_stop)
+    entry.async_create_background_task(
+        hass,
+        history_manager.async_start(),
+        name=f"{DOMAIN}_history_manager",
+    )
+
+    # Build the optional realtime listener now so SIP can read its token later,
+    # but do not claim/start FCM until all fallible setup awaits have completed.
+    fcm_listener = DoorbellFcmListener(hass, entry, coordinator.api)
+
+    # Two-way audio: контроллер приёма вызова (REGISTER-on-ring). Трекает
+    # активный FCM-вызов (SIGNAL_DOORBELL) и драйвит SipManager по сервису
+    # `answer`/`hangup`. FCM-токен берёт у listener (push-params REGISTER).
+    sip_controller = DoorbellCallController(
+        hass,
+        coordinator.api,
+        # `fcm_token` присваивается только внутри `_async_connect`, а тот
+        # достижим лишь после успешной регистрации ниже — до неё токен и так
+        # `None`, отдельный флаг ничего не добавлял.
+        lambda: fcm_listener.fcm_token,
+        go2rtc=_build_go2rtc_config(entry),
+        camera_resolver=lambda ac: _resolve_call_camera_id(coordinator, ac),
+    )
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, SIGNAL_DOORBELL, sip_controller.handle_signal)
+    )
+    hass.data.setdefault(_SIP_DATA, {})[entry.entry_id] = sip_controller
+    async_register_history_ws_command(hass)
+    # Phase C (ADR-0013): WS-команда uplink-микрофона (браузер → HA-WS → SIP)
+    # + раздача Lovelace-карты микрофона статикой.
+    async_register_uplink_ws_command(hass)
+    await async_register_uplink_card(hass)
+
+    # One-time migration: legacy state (disabled_by на entities/devices от
+    # старых версий integration) → None. Применяется один раз per entry.
+    migration_changed = _migrate_legacy_disabled_state(hass, entry)
+
+    # Visibility sync: hidden в /settings/screens → entity.hidden_by=INTEGRATION.
+    # `hidden_by` (НЕ disabled_by) — state machine продолжает работать
+    # (automations доступны), entity не показывается в default UI views.
+    # Пользователь может easily Show через Settings → Entities → filter Hidden.
+    # Sync не требует reload — registry update подхватывается HA core напрямую.
+    _sync_visibility(hass, entry, coordinator.data or {})
+
+    if stream_manager is not None:
+        # Reconcile с go2rtc не нужен для готовности entry: камеры получают
+        # источник через stream_source, а публикация догоняет фоном. Ожидание
+        # здесь удлиняло setup ровно на время похода к go2rtc.
+        entry.async_create_background_task(
+            hass,
+            stream_manager.async_start(),
+            name=f"{DOMAIN}_stream_manager_start",
+        )
+
+    # A surviving dependency client degrades only realtime FCM. Do not raise
+    # ConfigEntryNotReady: HA would retry setup forever and recreate log churn.
+    # Claim/start only after every fallible setup await, so a later setup unwind
+    # cannot strand a newly registered dependency-owned receiver.
+    if await _async_register_fcm_listener(hass, entry, fcm_listener):
+        entry.async_create_background_task(
+            hass, fcm_listener.async_start(), name=f"{DOMAIN}_fcm_listener"
+        )
+
+    # Reload только если migration реально сбросила disabled_by markers — entity
+    # требуют re-init платформ для применения. Sync visibility update в registry
+    # — это live operation, не нужен reload (см. A-64).
+    if migration_changed:
+        hass.async_create_task(
+            hass.config_entries.async_reload(entry.entry_id),
+            name=f"{DOMAIN}_migration_reload",
+        )
+
+    return True
+
+
+def _build_go2rtc_config(entry: ConfigEntry) -> Go2RtcConfig | None:
+    """go2rtc-конфиг для аудио-моста (downlink) из entry. None если go2rtc выключен."""
+    use = entry.options.get(CONF_USE_GO2RTC, entry.data.get(CONF_USE_GO2RTC))
+    base = entry.options.get(CONF_GO2RTC_BASE_URL) or entry.data.get(CONF_GO2RTC_BASE_URL)
+    if not use or not base:
+        return None
+    user = entry.options.get(CONF_GO2RTC_USERNAME) or entry.data.get(CONF_GO2RTC_USERNAME)
+    pwd = entry.options.get(CONF_GO2RTC_PASSWORD) or entry.data.get(CONF_GO2RTC_PASSWORD)
+    rtsp_host = (
+        entry.options.get(CONF_GO2RTC_RTSP_HOST)
+        or entry.data.get(CONF_GO2RTC_RTSP_HOST)
+        or DEFAULT_GO2RTC_RTSP_HOST
+    )
+    return Go2RtcConfig(
+        base_url=base, headers=go2rtc_auth_headers(user, pwd), rtsp_host=rtsp_host
+    )
+
+
+def _resolve_call_camera_id(coordinator: Any, access_control_id: str) -> str | None:
+    """access_control_id → camera_id домофона (intercom-камера) из coordinator.data.
+
+    Для видео-источника стрима вызова (B): берём go2rtc-стрим `mdr_<camera_id>` той же
+    точки доступа. Первая intercom-камера с совпавшим access_control_id."""
+    ac = str(access_control_id or "")
+    for cam in (getattr(coordinator, "data", None) or {}).get("cameras", []):
+        if str(cam.get("access_control_id") or "") == ac and cam.get("source") == "intercom":
+            return str(cam.get("id") or "") or None
+    return None
+
+
+def _async_register_sip_services(hass: HomeAssistant) -> None:
+    """Зарегистрировать сервисы `answer`/`hangup` (один раз на интеграцию).
+
+    Сервисы без target: действуют на текущий звонящий домофон — резолвят
+    контроллер с активным вызовом (`current_call`). Это mirror UX приложения
+    («Ответить» на входящий), без необходимости указывать устройство.
+    """
+    if hass.services.has_service(DOMAIN, SERVICE_ANSWER):
+        return
+
+    def _loaded_controllers() -> list:
+        """Контроллеры загруженных записей — либо внятный отказ.
+
+        Действие существует всегда (правило Bronze `action-setup`), поэтому
+        «интеграция не загружена» надо отличать от «сейчас никто не звонит»:
+        иначе человек ищет пропущенный вызов вместо выгруженной записи.
+        """
+        controllers = list(hass.data.get(_SIP_DATA, {}).values())
+        if not controllers:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="integration_not_loaded"
+            )
+        return controllers
+
+    async def _answer(_call: ServiceCall) -> None:
+        for controller in _loaded_controllers():
+            if controller.current_call() is not None:
+                await controller.async_answer()
+                return
+        # Успешно завершиться, ничего не сделав, — значит соврать вызывающему.
+        # Автоматизация не отличит ответ на звонок от промаха по времени, а
+        # человек в интерфейсе не поймёт, почему кнопка молчит. Тот же случай,
+        # что кнопка «Закрыть» у замка (правило Silver `action-exceptions`).
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="no_active_call"
+        )
+
+    async def _hangup(_call: ServiceCall) -> None:
+        # Спрашиваем контроллер, было ли что снимать, а не «идёт ли вызов»:
+        # `current_call()` гаснет по истечении окна ответа, а разговор живёт
+        # дальше. Отбой по этому признаку отказывался завершать живой
+        # разговор с открытым микрофоном — он держался до страховки.
+        torn_down = False
+        for controller in _loaded_controllers():
+            if await controller.async_hangup():
+                torn_down = True
+        if not torn_down:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="no_active_call"
+            )
+
+    hass.services.async_register(DOMAIN, SERVICE_ANSWER, _answer)
+    hass.services.async_register(DOMAIN, SERVICE_HANGUP, _hangup)
+
+
+_MIGRATION_FLAG_KEY = "visibility_migration_v2"
+_CAMERA_HISTORY_UNIQUE_ID_PREFIX = f"{DOMAIN}_event_history_camera_"
+
+
+def _migrate_legacy_disabled_state(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+) -> bool:
+    """One-time cleanup legacy disabled_by markers (entity + device).
+
+    Применяется один раз per entry, флаг в `entry.data` (НЕ options) — чтобы
+    запись flag-а не триггерила `async_update_options` listener → reload cascade
+    (см. A-64). Backward-compat: если flag уже в options от старой версии,
+    считаем migration выполненной и переносим в data.
+
+    Background: до перехода на hidden_by-based visibility sync интеграция
+    использовала disabled_by:
+    - entity.disabled_by=INTEGRATION/DEVICE (от cascade)
+    - device.disabled_by=INTEGRATION (от device-level sync)
+    - entity.disabled_by=USER (от bulk-disable пользователем в HA UI до bi-dir sync)
+
+    Все эти markers надо сбросить — новая модель использует только hidden_by,
+    который потом устанавливается _sync_visibility согласно current API state.
+
+    Returns True если что-то реально изменилось в registry (caller schedule
+    reload — entity нужны re-init платформ для применения disabled_by сброса).
+    """
+    if entry.data.get(_MIGRATION_FLAG_KEY) or entry.options.get(_MIGRATION_FLAG_KEY):
+        # Backward-compat: если flag в options от прошлой версии, перенесём в data
+        # без re-running миграции (registry уже cleaned).
+        if entry.options.get(_MIGRATION_FLAG_KEY) and not entry.data.get(_MIGRATION_FLAG_KEY):
+            new_options = {k: v for k, v in entry.options.items() if k != _MIGRATION_FLAG_KEY}
+            hass.config_entries.async_update_entry(
+                entry,
+                data={**entry.data, _MIGRATION_FLAG_KEY: True},
+                options=new_options,
+            )
+        return False
+
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
+    changed = False
+    reset_count = 0
+
+    # 1. Entities: disabled_by INTEGRATION/DEVICE/USER → None.
+    for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        # Motion history is intentionally opt-in. Its disabled marker is not
+        # legacy visibility state and must survive this one-time migration.
+        if entity.unique_id.startswith(_CAMERA_HISTORY_UNIQUE_ID_PREFIX):
+            continue
+        if entity.disabled_by in (
+            er.RegistryEntryDisabler.INTEGRATION,
+            er.RegistryEntryDisabler.DEVICE,
+            er.RegistryEntryDisabler.USER,
+        ):
+            ent_reg.async_update_entity(entity.entity_id, disabled_by=None)
+            reset_count += 1
+            changed = True
+
+    # 2. Devices: disabled_by INTEGRATION/USER → None (CONFIG_ENTRY HA сам).
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        if device.disabled_by in (
+            dr.DeviceEntryDisabler.INTEGRATION,
+            dr.DeviceEntryDisabler.USER,
+        ):
+            dev_reg.async_update_device(device.id, disabled_by=None)
+            reset_count += 1
+            changed = True
+
+    hass.config_entries.async_update_entry(
+        entry,
+        data={**entry.data, _MIGRATION_FLAG_KEY: True},
+    )
+
+    if reset_count:
+        LOGGER.info(
+            "One-time visibility migration: reset %d disabled_by markers "
+            "(entity + device). Sync будет использовать hidden_by вместо disabled_by.",
+            reset_count,
+        )
+
+    return changed
+
+
+def _sync_visibility(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    data: dict[str, Any],
+) -> bool:
+    """Two-way visibility sync `hidden_by` ↔ /settings/screens с user-override tracking.
+
+    Базовая логика:
+    - hidden в API + hidden_by=None + НЕТ user override → set INTEGRATION.
+    - visible в API + hidden_by=INTEGRATION → set None.
+    - hidden_by=USER → НЕ trogaem (явный user Hide через HA UI).
+
+    User-override tracking (A-64): хранится в `entity.options[DOMAIN]`
+    (entity_registry, persistent, НЕ триггерит config_entry listener):
+    - `we_set_integration: True` — мы пометили эту entity hidden_by=INTEGRATION.
+      Сбрасывается когда API возвращает visible.
+    - `user_shown: True` — юзер включил «Показывать на панели» (мы видим
+      `we_set_integration=True` но `hidden_by=None`). С этого момента не
+      восстанавливаем INTEGRATION даже если API hidden. Сбрасывается когда
+      приложение тоже разрешит показ.
+
+    Когда вызывается: только в `async_setup_entry` (cold start, reload,
+    reauth, любой options change). НЕ на каждом coordinator-tick — это
+    осознанно, чтобы избежать постоянного registry write activity. Изменения
+    `/settings/screens` в приложении подхватятся при следующем reload entry
+    или рестарте HA.
+
+    Почему `hidden_by`, а не `disabled_by`:
+    - disabled_by INTEGRATION блокирует UI override («устройство деактивировано»).
+    - hidden_by — entity скрыта из default UI views, state machine работает,
+      юзер easily Show через toggle «Показывать на панели».
+
+    Returns True если что-то реально изменилось в hidden_by. Caller использует
+    для logging — reload НЕ требуется (registry update live).
+    """
+    hidden_uids: set[str] = set()
+
+    for cam in data.get("cameras") or []:
+        if cam.get("hidden") and cam.get("id"):
+            hidden_uids.add(f"{DOMAIN}_camera_{cam['id']}")
+
+    for lk in data.get("locks") or []:
+        if lk.get("hidden"):
+            hidden_uids.add(
+                lock_unique_id(
+                    lk.get("place_id"),
+                    lk.get("access_control_id"),
+                    lk.get("entrance_id"),
+                )
+            )
+
+    ent_reg = er.async_get(hass)
+    registry_changed = False
+    hid = 0
+    shown = 0
+
+    for entity in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        if entity.domain not in ("camera", "lock"):
+            continue
+
+        uid = entity.unique_id
+        api_hidden = uid in hidden_uids
+        current = entity.hidden_by
+        opts = dict(entity.options.get(DOMAIN) or {})
+        we_set_integration = bool(opts.get("we_set_integration"))
+        user_shown = bool(opts.get("user_shown"))
+        new_opts = dict(opts)
+
+        # Detect user-shown override: мы ранее set INTEGRATION, но registry уже None.
+        # Юзер кликнул «Показывать на панели» — сохраняем флаг.
+        if we_set_integration and current is None and not user_shown:
+            new_opts["user_shown"] = True
+            user_shown = True
+            LOGGER.info(
+                "User override saved: %s (unique_id=%s) — пользователь включил "
+                "«Показывать на панели», не восстанавливаем INTEGRATION",
+                entity.entity_id, uid,
+            )
+
+        # Auto-clear user override если приложение тоже разрешило показ.
+        if not api_hidden and user_shown:
+            new_opts.pop("user_shown", None)
+            user_shown = False
+
+        if api_hidden and not user_shown:
+            # Должна быть скрыта по API и юзер не override.
+            if current is None:
+                LOGGER.debug(
+                    "Hiding entity %s (unique_id=%s) — hidden in user app",
+                    entity.entity_id, uid,
+                )
+                ent_reg.async_update_entity(
+                    entity.entity_id, hidden_by=er.RegistryEntryHider.INTEGRATION
+                )
+                hid += 1
+                registry_changed = True
+                new_opts["we_set_integration"] = True
+            elif current == er.RegistryEntryHider.INTEGRATION:
+                # Уже скрыто нами — поддерживаем флаг (важно для restart).
+                new_opts["we_set_integration"] = True
+        elif not api_hidden and current == er.RegistryEntryHider.INTEGRATION:
+            # API разрешил показ — снимаем INTEGRATION.
+            LOGGER.debug(
+                "Showing entity %s (unique_id=%s) — visible in user app",
+                entity.entity_id, uid,
+            )
+            ent_reg.async_update_entity(entity.entity_id, hidden_by=None)
+            shown += 1
+            registry_changed = True
+            new_opts.pop("we_set_integration", None)
+        elif not api_hidden:
+            # API visible и hidden_by не INTEGRATION — наш marker неактуален.
+            new_opts.pop("we_set_integration", None)
+
+        # Persist options только если изменились (не триггерит config_entry listener).
+        if new_opts != opts:
+            ent_reg.async_update_entity_options(entity.entity_id, DOMAIN, new_opts)
+
+    if hid or shown:
+        LOGGER.info(
+            "Visibility sync: hidden_uids=%d, hid=%d, shown=%d (entry %s)",
+            len(hidden_uids), hid, shown, entry.entry_id,
+        )
+    return registry_changed
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate old entry."""
+    version = config_entry.version
+    new_data: ConfigType = {**config_entry.data}
+    options: ConfigType = {**config_entry.options}
+
+    LOGGER.debug("Migrating from version %s", version)
+
+    # Migration to version 2: add user_agent field
+    if version == 1:
+        user_agent = UserAgent()
+        user_agent.operator_id = new_data[CONF_OPERATOR_ID]
+        new_data[CONF_USER_AGENT] = json.dumps(user_agent.json())
+
+        version = 2
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, options=options, version=version
+        )
+        LOGGER.debug("Migration to version %s successful", version)
+
+    # Migration to version 3: add go2rtc configuration
+    if version == 2:
+        new_data[CONF_USE_GO2RTC] = False
+        new_data[CONF_GO2RTC_BASE_URL] = DEFAULT_GO2RTC_BASE_URL
+        new_data[CONF_GO2RTC_RTSP_HOST] = DEFAULT_GO2RTC_RTSP_HOST
+
+        version = 3
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, options=options, version=version
+        )
+        LOGGER.debug("Migration to version %s successful", version)
+
+    LOGGER.debug("Migration to config version %s successful", config_entry.version)
+
+    return True
+
+
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Update options for entry that was configured via user interface."""
+    coordinator = getattr(entry, "runtime_data", None)
+    non_tokens = {key: value for key, value in entry.data.items()
+                  if key not in (CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_FCM_CREDENTIALS)}
+    if (
+        coordinator is not None
+        and getattr(coordinator, "entry_options_snapshot", None) == dict(entry.options)
+        and getattr(coordinator, "entry_non_token_snapshot", None) == non_tokens
+    ):
+        # Token rotation must not tear down a running SIP call or stream.
+        return
+    stream_manager = hass.data.get(STREAM_MANAGER_DATA, {}).get(entry.entry_id)
+    if (
+        stream_manager is not None
+        and await stream_manager.async_apply_entry_options()
+    ):
+        return
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    device_entry: DeviceEntry,
+) -> bool:
+    """Разрешить пользователю удалить device через UI / WS-API.
+
+    Возвращаем True безусловно — orphan devices (после переименований в
+    приложении оператора или смены device-identifier между релизами)
+    должны удаляться. На следующем тике coordinator пересоздаст актуальные
+    devices, а удалённые останутся удалёнными.
+    """
+    return True
+
+
+async def async_unload_entry(
+    hass: HomeAssistant, entry: MyDomRuConfigEntry
+) -> bool:
+    """Unload a config entry.
+
+    Cleanup-функции coordinator-а (dispatcher listener, options listener)
+    зарегистрированы через `entry.async_on_unload` в `async_setup_entry` —
+    HA-core вызовет их автоматически независимо от исхода platform unload
+    (см. audit A-16).
+    """
+    # Клипы этого entry больше не нужны — не ждём истечения TTL.
+    async_release_clip_cache(hass, entry.entry_id)
+    fcm_listener = hass.data.get(_FCM_DATA, {}).get(entry.entry_id)
+    if fcm_listener is not None:
+        # Как и в двух других точках остановки: текст исключения зависимости
+        # наружу не выпускаем — HA положил бы `str(exc)` в `reason` записи и
+        # показал его пользователю (ADR-0004).
+        try:
+            stopped = await fcm_listener.async_stop()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "FCM: listener не завершён при выгрузке (%s)",
+                type(err).__name__,
+            )
+            stopped = False
+        if not stopped:
+            return False
+
+    stream_manager = hass.data.get(STREAM_MANAGER_DATA, {}).get(entry.entry_id)
+    if stream_manager is not None:
+        await stream_manager.async_stop()
+
+    # Two-way audio: завершить активный разговор (BYE) и снять контроллер.
+    # Сами действия НЕ снимаем: они живут в `async_setup`, который HA зовёт
+    # один раз за запуск — домен остаётся в `hass.config.components`, и при
+    # повторной загрузке записи регистрация не повторится. Снятие здесь
+    # означало бы, что после смены опций, переавторизации или «Перезагрузить»
+    # действий нет до перезапуска HA (правило Bronze `action-setup`).
+    sip_controller = hass.data.get(_SIP_DATA, {}).pop(entry.entry_id, None)
+    if sip_controller is not None:
+        await sip_controller.async_hangup()
+
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        hass.data.get(_FCM_DATA, {}).pop(entry.entry_id, None)
+        hass.data.get(STREAM_MANAGER_DATA, {}).pop(entry.entry_id, None)
+
+    return unload_ok
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """На удалении интеграции — отвязать FCM push-токен у оператора (best-effort).
+
+    Вызывается HA только при удалении entry (НЕ при reload/unload), поэтому
+    отвязка не происходит на каждый reload. После failed unload повторяем stop
+    retained FCM owner; если dependency снова не остановилась, сохраняем owner,
+    а HA уже вернёт пользователю `require_restart`.
+    Для remote cleanup строим временный API из entry.data; ошибки глушим, чтобы
+    cleanup не мешал удалению.
+    """
+    registry = hass.data.get(_FCM_DATA, {})
+    listener = registry.get(entry.entry_id)
+    if listener is not None:
+        try:
+            stopped = await listener.async_stop()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "FCM: не удалось завершить listener при удалении entry (%s)",
+                type(err).__name__,
+            )
+        else:
+            # A failed ordinary unload makes HA report that restart is required.
+            # Keep ownership on another failed stop instead of orphaning a
+            # dependency receiver whose shutdown was not confirmed.
+            if stopped and registry.get(entry.entry_id) is listener:
+                registry.pop(entry.entry_id)
+
+    async_delete_fcm_repair_issue(hass, entry.entry_id)
+    try:
+        user_agent = UserAgent()
+        user_agent.from_json(json.loads(entry.data[CONF_USER_AGENT]))
+        api = MyDomRuAPI(
+            hass,
+            user_agent,
+            access_token=entry.data.get(CONF_ACCESS_TOKEN),
+            refresh_token=entry.data.get(CONF_REFRESH_TOKEN),
+            operator=str(entry.data.get(CONF_OPERATOR_ID)),
+        )
+        if not await api.unregister_push_device():
+            # Единственный сигнал: сам метод отказ глотает и возвращает
+            # False, а транспорт об отказах говорит только на `debug`.
+            # Оставшийся у оператора токен — это push-и на устройство,
+            # которое интеграцию уже удалило.
+            LOGGER.warning("Оператор не принял отвязку push-токена при удалении записи")
+    except Exception:  # noqa: BLE001
+        LOGGER.warning("Push-токен не отвязан при удалении записи (best-effort)")

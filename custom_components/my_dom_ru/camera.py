@@ -1,0 +1,1064 @@
+"""Camera entity — CoordinatorEntity-based.
+
+См. ADR-0002. Slice 3b: camera использует coordinator.data для availability.
+Stream / snapshot — on-demand actions (не кэшируются в coordinator.data).
+
+Closes A-44: `async_update` удалён, дублирующий `get_camera_stream`-запрос
+тоже. Stream URL получается лениво в `stream_source()`.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import time
+from datetime import datetime, timedelta
+from functools import partial
+from typing import TYPE_CHECKING, Any
+
+from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import (
+    DEFAULT_SNAPSHOT_WIDTH,
+    AREA_INTERCOM,
+    AREA_INDOOR_CAM,
+    AREA_NEIGHBOR_CAM,
+    AREA_PUBLIC_CAM,
+    CONF_GO2RTC_BASE_URL,
+    CONF_GO2RTC_PASSWORD,
+    CONF_GO2RTC_RTSP_HOST,
+    CONF_GO2RTC_USERNAME,
+    CONF_USE_GO2RTC,
+    DOMAIN,
+    LOGGER,
+    STREAM_MANAGER_DATA,
+)
+from .call_camera import MyDomRuCallCamera
+from .device import linked_to_place, place_device_id
+from .coordinator import MyDomRuConfigEntry, MyDomRuUpdateCoordinator
+from .go2rtc import go2rtc_auth_headers
+from .stream_manager import CameraStreamManager
+
+if TYPE_CHECKING:
+    from homeassistant.components.stream import Stream
+
+# Сколько кадр считается свежим. Пока свежий — отдаём из памяти, вообще не
+# беспокоя оператора; когда устарел, но ещё не протух — отдаём сразу, а
+# обновление уходит в фон. Иначе каждое открытие карточки ждало операторский
+# JPEG и встречало белым экраном.
+#
+# Тридцать секунд, а не десять: карточка HA сама опрашивает камеру примерно
+# раз в десять секунд, поэтому при равном интервале почти каждый опрос попадал
+# в «протух» и порождал фоновый запрос. Картинка подъезда и лифта статична,
+# так что полминуты незаметны, а обращений к оператору втрое меньше.
+SNAPSHOT_FRESH_SECONDS = 30.0
+
+# Предел, после которого кадр уже нельзя показывать как текущий. Минуты здесь
+# мало: страницу закрывают и возвращаются через несколько минут, а к тому
+# моменту фоновой кадр протухал — запрос был потрачен впустую, и пользователя
+# снова встречал белый экран. Пять минут для подъезда и лифта незаметны, а
+# ожидание убирают.
+#
+# Потребителям, которым нужен именно текущий вид, потолок не помощник — им
+# нужен свежий кадр всегда: экран входящего вызова ходит мимо кэша через
+# `async_fresh_camera_image`.
+SNAPSHOT_MAX_STALE_SECONDS = 300.0
+
+# Как часто MJPEG-луп ядра просит кадр. Нагрузку на оператора этот интервал не
+# определяет — запросы гейтит кэш, — но период ядро отмеряет ДО запроса, и при
+# интервале, равном окну свежести, кадр на каждом тике оказывался ровно на
+# границе: обновление срабатывало через раз, и половина показанных кадров была
+# минутной давности. Треть окна убирает биение той же ценой.
+SNAPSHOT_MJPEG_INTERVAL_SECONDS = SNAPSHOT_FRESH_SECONDS / 3
+
+# Сколько разных размеров держим. Реальных немного — список, карточка, полный
+# экран, — поэтому запас невелик и вытесняем самый старый.
+SNAPSHOT_CACHE_ENTRIES = 8
+
+# Пауза между попытками, когда оператор не отдаёт кадр. Наблюдалось `531` на
+# `/snapshots` для трёх камер подряд: без паузы каждый рендер карточки бил в
+# API, а показать всё равно нечего. Показатель ограничивается ДО возведения в
+# степень — та же ошибка уже стоила падения в двух других местах (A-104).
+SNAPSHOT_RETRY_INITIAL_SECONDS = 15.0
+SNAPSHOT_RETRY_MAX_SECONDS = 300.0
+SNAPSHOT_RETRY_MAX_EXPONENT = math.ceil(
+    math.log2(SNAPSHOT_RETRY_MAX_SECONDS / SNAPSHOT_RETRY_INITIAL_SECONDS)
+)
+
+# A-71 / ADR-0009: минимальный интервал между авто-recovery попытками.
+# HA Stream worker сигналит unavailable на каждый retry-tick (10/20/30с);
+# без cooldown re-fetch забивал бы operator API. См. ADR-0009.
+STREAM_RECOVERY_COOLDOWN = 30.0
+
+# Экспоненциальный backoff, когда recovery не помогает. Оператор умеет
+# отвечать 500 на `/video` часами подряд (production 2026-09-05: три камеры,
+# непрерывно с 08:08 до 09:53). Без backoff health-poll дёргал recovery раз в
+# минуту бесконечно — около 1400 бесполезных запросов в сутки на камеру и
+# столько же ERROR в журнале. Пауза удваивается на каждую неудачу подряд и
+# упирается в потолок; первый же успех сбрасывает счётчик.
+STREAM_RECOVERY_BACKOFF_MAX = 1800.0
+# Показатель ограничивается ДО возведения в степень. Счётчик неудач ничем не
+# ограничен, и `2 ** failures` перестаёт помещаться во float примерно на 1024-й
+# неудаче подряд. Та же форма уже стоила падения в `stream_manager`, только
+# здесь последствие тяжелее: исключение летит из `@callback`, который зовут
+# HA Stream и оба таймера, и авто-recovery для камеры умирает насовсем.
+STREAM_RECOVERY_MAX_EXPONENT = math.ceil(
+    math.log2(STREAM_RECOVERY_BACKOFF_MAX / STREAM_RECOVERY_COOLDOWN)
+)
+
+# `0` — осознанно, а не «здесь только чтение»: `camera.snapshot` идёт через
+# семафор платформы и дёргает оператора на каждую сущность. Но превью в
+# интерфейсе ходит мимо семафора (`CameraImageView`), поэтому сериализация
+# закрыла бы лишь часть обращений к оператору, оставив основную. Наплыв
+# держат кэш снимка и `_snapshot_retry_after`, а не эта константа.
+PARALLEL_UPDATES = 0
+
+# A-71 v2 / ADR-0009: интервал poll'а go2rtc producer-health для
+# go2rtc/WebRTC-only пути (камеры без legacy HA Stream worker — напр. лифты).
+# Живой forpost-поток шлёт ~150 КБ/с; `bytes_recv`, замороженный за интервал
+# при наличии consumers → producer мёртв (operator session EOF) → recovery.
+GO2RTC_HEALTH_POLL_INTERVAL = timedelta(seconds=30)
+
+# A-71 v3 / ADR-0009: PROACTIVE keep-alive refresh интервал.
+# Production DIAG (2026-05-28 17h): v1/v2 reactive механизмы не покрывают
+# реальный кейс — WebRTC consumer отваливается БЫСТРЕЕ poll-интервала, а
+# session-level cutoff бэкенда бьёт ВСЕ потоки синхронно независимо от
+# наблюдателей. Нужен proactive refresh.
+# Архитектурная оптимизация: рефреш ТОЛЬКО для streams с активными consumers
+# (someone currently viewing) — не нагружаем сеть для камер, которые никто не
+# смотрит. Первое открытие после idle → HA go2rtc triggers stream_source() →
+# fresh fetch автоматически.
+# Интервал 28:30 = 95% от observed minimum TTL 30:00 (1.5 мин safety margin).
+# Эмпирически TTL operator-сессии deterministic = 30:00. Margin 90с = 180x
+# recovery latency (<1с) + 100x client jitter (~800мс) — race-window закрыт.
+# Если v3 пропустит (network blip) — v1/v2 поймают.
+GO2RTC_PROACTIVE_REFRESH_INTERVAL = timedelta(minutes=28, seconds=30)
+
+
+def _snapshot_size(width: int | None, height: int | None) -> tuple[int, int]:
+    """Размер, который реально уйдёт оператору (та же нормализация)."""
+    w = width or DEFAULT_SNAPSHOT_WIDTH
+    h = height or round(w / 16 * 9)
+    return (w, h)
+
+
+def _get_go2rtc_cfg(
+    entry: MyDomRuConfigEntry,
+) -> tuple[bool, str | None, str | None, str | None, str | None]:
+    use_go2rtc = (
+        entry.options.get(CONF_USE_GO2RTC)
+        if CONF_USE_GO2RTC in entry.options
+        else entry.data.get(CONF_USE_GO2RTC, False)
+    )
+    base_url = entry.options.get(CONF_GO2RTC_BASE_URL) or entry.data.get(CONF_GO2RTC_BASE_URL)
+    rtsp_host = entry.options.get(CONF_GO2RTC_RTSP_HOST) or entry.data.get(CONF_GO2RTC_RTSP_HOST)
+    go2rtc_username = entry.options.get(CONF_GO2RTC_USERNAME) or entry.data.get(CONF_GO2RTC_USERNAME)
+    go2rtc_password = entry.options.get(CONF_GO2RTC_PASSWORD) or entry.data.get(CONF_GO2RTC_PASSWORD)
+    return bool(use_go2rtc), base_url, rtsp_host, go2rtc_username, go2rtc_password
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: MyDomRuConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up Dom.ru Smart Home Camera based on a config entry."""
+    coordinator = entry.runtime_data
+    cameras = (coordinator.data or {}).get("cameras") or []
+    stream_manager: CameraStreamManager | None = hass.data.get(
+        STREAM_MANAGER_DATA, {}
+    ).get(entry.entry_id)
+
+    use_go2rtc, base_url, rtsp_host, go2rtc_username, go2rtc_password = _get_go2rtc_cfg(entry)
+
+    async_add_entities(
+        MyDomRuCamera(
+            coordinator,
+            camera_info,
+            entry=entry,
+            stream_manager=stream_manager,
+            via_device_id=place_device_id(
+                hass, entry.entry_id, str(camera_info.get("place_id") or "")
+            ),
+        )
+        for camera_info in cameras
+    )
+
+    # Two-way audio: камера-сущность экрана вызова (рефреш-на-открытии, ADR-0012 C).
+    # Контроллер создаётся в __init__ ПОСЛЕ forward_entry_setups — резолвим лениво
+    # через _controller_getter, чтобы не зависеть от timing setup. Регистрируется
+    # всегда при наличии go2rtc-конфига, без проверки controller is not None.
+    if use_go2rtc and base_url and rtsp_host:
+        def _doorbell_lookup(camera_id: str):
+            """Найти camera-сущность домофона по unique_id в платформе camera."""
+            comp = hass.data.get("camera")
+            if comp is None:
+                return None
+            uid = f"{DOMAIN}_camera_{camera_id}"
+            for ent in comp.entities:
+                if getattr(ent, "unique_id", None) == uid:
+                    return ent
+            return None
+
+        entry_id = entry.entry_id
+
+        def _controller_getter():
+            # Контроллер создаётся в __init__ ПОСЛЕ forward_entry_setups — резолвим лениво.
+            return hass.data.get(f"{DOMAIN}_sip", {}).get(entry_id)
+
+        async_add_entities([
+            MyDomRuCallCamera(
+                controller_getter=_controller_getter,
+                go2rtc_base_url=base_url,
+                go2rtc_headers=go2rtc_auth_headers(go2rtc_username, go2rtc_password),
+                rtsp_host=rtsp_host,
+                doorbell_lookup=_doorbell_lookup,
+                entry_id=entry_id,
+            )
+        ])
+
+
+class MyDomRuCamera(
+    CoordinatorEntity[MyDomRuUpdateCoordinator], Camera
+):
+    """Camera entity (CoordinatorEntity).
+
+    Slice 3c (Bronze polish):
+    - Стабильный `unique_id = f"{DOMAIN}_camera_{camera_id}"` (без `name`,
+      см. ADR-0002, A-12). Миграция старого формата `{id}_{name}` — в
+      `async_setup_entry` через `er.async_migrate_entries`.
+    - `_attr_has_entity_name = True` + `_attr_name = None`: camera как
+      самостоятельный device, имя берётся из `device_info.name`.
+    """
+
+    _attr_supported_features = CameraEntityFeature.STREAM
+    # MJPEG-луп ядра дёргает `async_camera_image` по этому интервалу. Дефолтные
+    # 0.5 с давали двадцать холостых оборотов на каждый реально новый кадр.
+    _attr_frame_interval = SNAPSHOT_MJPEG_INTERVAL_SECONDS
+    _attr_has_entity_name = True
+    _attr_name = None
+
+    def __init__(
+        self,
+        coordinator: MyDomRuUpdateCoordinator,
+        camera_info: dict[str, Any],
+        *,
+        entry: MyDomRuConfigEntry,
+        stream_manager: CameraStreamManager | None,
+        via_device_id: str | None = None,
+    ) -> None:
+        # Camera.__init__ инициализирует Entity-state; затем регистрируемся в coordinator.
+        # Явные вызовы, а не super(): порядок здесь значимый, а MRO дал бы обратный.
+        # Проверка типов не параметризует unbound `CoordinatorEntity.__init__`.
+        CoordinatorEntity.__init__(self, coordinator)  # pyright: ignore[reportArgumentType]
+        Camera.__init__(self)
+
+        self._id = str(camera_info.get("id") or "")
+        self._name: str = camera_info.get("name") or self._id
+
+        # Intercom-камеры (от entrances в access_controls) имеют place_id +
+        # access_control_id + entrance_id и разделяют device с lock того же
+        # entrance. Public/place-cameras без этих полей → standalone devices.
+        ac_id = camera_info.get("access_control_id")
+        place_id = camera_info.get("place_id")
+        entrance_id = camera_info.get("entrance_id")
+        source = camera_info.get("source") or "public"  # fallback
+        is_intercom = source == "intercom" and bool(ac_id and place_id)
+
+        # Visibility управляется на DEVICE-уровне в __init__.py:_sync_visibility:
+        # если все entities device hidden в API → device.disabled_by=INTEGRATION,
+        # HA автоматически set entity.disabled_by=DEVICE (cascade).
+        LOGGER.debug("Camera init id=%s source=%s hidden=%s",
+                     self._id, source, camera_info.get("hidden"))
+
+        # A-65: counter consecutive empty stream URL responses для лог-throttling.
+        # 1й fail → WARNING, 2й+ подряд → DEBUG, reset на первый success.
+        self._consecutive_empty_count: int = 0
+        # A-68: in-flight future для dedup concurrent stream_source() calls.
+        # HA Stream worker + Frigate + Lovelace могут одновременно дёргать
+        # stream_source — без dedup это создаёт N HTTP к operator + N PATCH в
+        # go2rtc + N `Stream.update_source()` restart → «мигание видео».
+        self._inflight_stream_future: asyncio.Future[str | None] | None = None
+        # A-71: monotonic-метка последней авто-recovery (throttle, см. ADR-0009).
+        self._last_recovery_monotonic: float = 0.0
+        # Неудачные авто-recovery подряд — основание backoff.
+        self._recovery_failures: int = 0
+        # A-71 v2: go2rtc producer-health poll (go2rtc/WebRTC-only путь, лифты).
+        # baseline `bytes_recv` с прошлого опроса + unsub таймера.
+        self._go2rtc_last_bytes_recv: int | None = None
+        self._unsub_health_poll: CALLBACK_TYPE | None = None
+        # A-71 v3: proactive keep-alive refresh для активных consumers.
+        self._unsub_proactive_refresh: CALLBACK_TYPE | None = None
+        # Кэш на несколько размеров: дашборд и автоматизация просят разные,
+        # и единственная запись заставляла бы их вытеснять друг друга.
+        self._snapshots: dict[tuple[int, int], tuple[bytes, float]] = {}
+        self._snapshot_inflight: dict[tuple[int, int], asyncio.Task[bytes | None]] = {}
+        self._snapshot_failures: int = 0
+        self._snapshot_retry_after: float = 0.0
+        self._snapshot_task: asyncio.Task[None] | None = None
+        self._attr_unique_id = f"{DOMAIN}_camera_{self._id}"
+        if is_intercom:
+            device_uid = f"entrance_{place_id}_{ac_id}_{entrance_id or 'main'}"
+            self._attr_device_info = linked_to_place(
+                DeviceInfo(
+                    identifiers={(DOMAIN, device_uid)},
+                    name=self._name,
+                    manufacturer="Умный Дом.ру",
+                    model="Intercom",
+                    suggested_area=AREA_INTERCOM,
+                ),
+                via_device_id,
+            )
+        else:
+            # source="place" — личные подписочные камеры из /rest/v1/.../cameras
+            # (юзер их купил отдельно). source="public" — всё из
+            # /rest/v2/.../public/cameras (общедомовые + городские, API не
+            # разделяет; юзер может скрыть конкретные через app — см. `hidden`).
+            if source == "place":
+                model = "Indoor Camera"
+                area = AREA_INDOOR_CAM
+            elif source == "neighbor":
+                model = "Neighbor Camera"
+                area = AREA_NEIGHBOR_CAM
+            else:
+                model = "Public Camera"
+                area = AREA_PUBLIC_CAM
+            self._attr_device_info = DeviceInfo(
+                identifiers={(DOMAIN, f"camera_{self._id}")},
+                name=self._name,
+                manufacturer="Умный Дом.ру",
+                model=model,
+                suggested_area=area,
+            )
+
+        self._entry = entry
+        self._stream_manager = stream_manager
+        self._use_go2rtc = stream_manager is not None
+        self._go2rtc_stream_name = f"mdr_{self._id}"
+
+    @property
+    def _coordinator_camera_info(self) -> dict[str, Any] | None:
+        """Найти текущую запись camera в coordinator.data."""
+        cameras = (self.coordinator.data or {}).get("cameras") or []
+        for cam in cameras:
+            if str(cam.get("id") or "") == self._id:
+                return cam
+        return None
+
+    @property
+    def available(self) -> bool:
+        """Доступна, если camera найдена в последнем refresh coordinator."""
+        return super().available and self._coordinator_camera_info is not None
+
+    # ------------------------------------------------------------------ #
+    # go2rtc                                                             #
+    # ------------------------------------------------------------------ #
+
+    def _rtsp_url(self) -> str:
+        """Authenticated RTSP URL for HA Stream / WebRTC pipelines."""
+        if self._stream_manager is None:
+            raise RuntimeError("go2rtc stream manager is not configured")
+        return self._stream_manager.client.rtsp_url(
+            self._go2rtc_stream_name,
+            include_credentials=True,
+        )
+
+    async def async_go2rtc_video_rtsp(self) -> str | None:
+        """RTSP видео для composite-стрима вызова (A-88 A3).
+
+        Если `mdr_<id>` уже поднят в go2rtc **живым** producer'ом (ringing-превью /
+        другой viewer) — отдаём локальный RTSP **без** второго HTTP к operator
+        (оператор рвёт параллельные forpost-сессии). «Живой» = producer уже принял
+        байты (`bytes_recv` > 0): по одному снимку `/api/streams` заморозку (A-71,
+        EOF operator-сессии) не отличить, но пустой/handshake producer (`bytes_recv`
+        0 / нет) отсекаем — иначе reuse мёртвой сессии → замороженное видео вызова.
+        Иначе — один bootstrap через `stream_source()` (свежий operator-URL).
+        """
+        if not self._use_go2rtc:
+            return await self.stream_source()
+        info = await self._fetch_go2rtc_stream_info()
+        if info is not None:
+            producers, _consumers = info
+            if producers and self._producer_has_traffic(producers[0]):
+                LOGGER.debug(
+                    "Camera %s (%s): reuse go2rtc producer %s for call video",
+                    self._name, self._id, self._go2rtc_stream_name,
+                )
+                return self._rtsp_url()
+        return await self.stream_source()
+
+    @staticmethod
+    def _producer_has_traffic(producer: dict[str, Any]) -> bool:
+        """Producer уже принял данные (`bytes_recv` > 0) — не пустой/handshake."""
+        recv = producer.get("bytes_recv")
+        return isinstance(recv, int) and recv > 0
+
+    def _rtsp_url_redacted(self) -> str:
+        """Credential-free stable RTSP URL safe for logs/diagnostics."""
+        if self._stream_manager is None:
+            return "<unconfigured>"
+        return self._stream_manager.client.rtsp_url(
+            self._go2rtc_stream_name,
+            include_credentials=False,
+        )
+
+    # ------------------------------------------------------------------ #
+    # On-demand actions                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _is_hidden(self) -> bool:
+        """A-63 (PARTIAL): skip только для snapshot, НЕ для stream_source.
+
+        Используется ТОЛЬКО в `async_camera_image` — snapshot on-demand,
+        lifecycle проблем нет, skip безопасен.
+
+        Для `stream_source` skip убран (см. A-66v3): HA Stream worker pin-ится
+        к RTSP URL который мы вернули один раз; `stream_source` повторно не
+        вызывается. Если мы возвращаем None после того как stream была
+        активна, worker зависает в retry-loop на устаревшем RTSP/producer.
+        Лучше всегда возвращать живой URL + обновлять go2rtc producer. HA
+        Stream сам переподключается к стабильному proxy URL после EOF.
+        """
+        reg = self.registry_entry
+        return reg is not None and reg.hidden_by is not None
+
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Вернуть кадр камеры, по возможности не дожидаясь оператора.
+
+        Свежий снимок отдаём из памяти. Устаревший — тоже отдаём сразу, а
+        обновление уходит в фон: карточка показывает прошлый кадр вместо
+        белого экрана, пока едет новый. Ждём оператора только когда показать
+        нечего — на самом первом открытии камеры.
+        """
+        if self._is_hidden() or not self.available:
+            return None
+
+        # Ключ по нормализованному размеру: координатор всё равно подставляет
+        # ширину по умолчанию, поэтому `(None, None)` и `(300, 169)` — один и
+        # тот же запрос к оператору, и держать их в разных ячейках значило бы
+        # ходить за одинаковым кадром дважды.
+        size = _snapshot_size(width, height)
+        cached = self._snapshots.get(size)
+        if cached is not None:
+            image, taken = cached
+            age = time.monotonic() - taken
+            if age < SNAPSHOT_FRESH_SECONDS:
+                return image
+            if age < SNAPSHOT_MAX_STALE_SECONDS:
+                self._schedule_snapshot_refresh(size)
+                return image
+
+        # Размера в кэше нет, но кадр этой камеры есть в другом. HA просит
+        # разные размеры для списка, карточки и полноэкранного вида, поэтому
+        # ожидание на каждом новом размере снова показывало бы белый экран.
+        # Ядро масштабирует JPEG само, так что чужой размер здесь уместен.
+        substitute = self._recent_snapshot(size)
+        if substitute is not None:
+            self._schedule_snapshot_refresh(size)
+            return substitute
+
+        # Показать нечего. Если оператор в отказе — не бьём в него на каждый
+        # рендер: кадра это не даст, а нагрузку создаст.
+        if time.monotonic() < self._snapshot_retry_after:
+            return None
+
+        return await self._async_fetch_snapshot(size)
+
+    @callback
+    def _remember_snapshot(self, size: tuple[int, int], image: bytes) -> None:
+        """Положить кадр в кэш, удержав его в пределах бюджета."""
+        now = time.monotonic()
+        for stale in [
+            key
+            for key, (_image, taken) in self._snapshots.items()
+            if now - taken >= SNAPSHOT_MAX_STALE_SECONDS
+        ]:
+            self._snapshots.pop(stale, None)
+
+        self._snapshots[size] = (image, now)
+
+        while len(self._snapshots) > SNAPSHOT_CACHE_ENTRIES:
+            oldest = min(self._snapshots.items(), key=lambda item: item[1][1])[0]
+            self._snapshots.pop(oldest, None)
+
+    @callback
+    def _recent_snapshot(self, wanted: tuple[int, int]) -> bytes | None:
+        """Свежайший кадр, годный к показу вместо запрошенного размера.
+
+        Годится только кадр не мельче запрошенного: уменьшение безвредно —
+        ядро масштабирует JPEG само, — а увеличение портит картинку. Иконка
+        80x80, растянутая на карточку, это не «чуть хуже», а нечитаемое
+        месиво; лучше подождать оператора.
+        """
+        now = time.monotonic()
+        usable = [
+            (taken, image)
+            for (width, _height), (image, taken) in self._snapshots.items()
+            if now - taken < SNAPSHOT_MAX_STALE_SECONDS and width >= wanted[0]
+        ]
+        if not usable:
+            return None
+        return max(usable)[1]
+
+    async def async_fresh_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Кадр в обход кэша — для тех, кому нужен именно текущий вид.
+
+        Экран входящего вызова показывает гостя, который стоит у двери прямо
+        сейчас; отдать ему кадр из кэша значило бы показать прошлое. Если
+        оператор кадра не дал — честнее пустое место: вид пятиминутной
+        давности от текущего не отличить.
+        """
+        if self._is_hidden() or not self.available:
+            return None
+        return await self._async_fetch_snapshot(_snapshot_size(width, height))
+
+    async def _async_fetch_snapshot(self, size: tuple[int, int]) -> bytes | None:
+        """Сходить к оператору за кадром и запомнить его.
+
+        Параллельные вызовы объединяются: на холодном кэше карточка, MJPEG-луп
+        и сервис снапшота приходят одновременно, а оператор рвёт параллельные
+        сессии — та же причина, по которой дедуплицирован `stream_source`
+        (A-68).
+        """
+        inflight = self._snapshot_inflight.get(size)
+        if inflight is not None:
+            return await asyncio.shield(inflight)
+
+        # Задача записи, а не hass: снимается при выгрузке и не держит
+        # startup-барьер.
+        task = self._entry.async_create_background_task(
+            self.hass,
+            self._async_fetch_snapshot_impl(size),
+            name=f"{DOMAIN}_camera_snapshot_fetch_{self._id}",
+            eager_start=False,
+        )
+        self._snapshot_inflight[size] = task
+        # Запись снимает сама задача, а не ожидающий кадр. Ядро рвёт ожидание
+        # снимка через 10 с, а запрос к оператору живёт до 60 с: снятие в
+        # `finally` открывало бы вторую параллельную сессию ровно на медленном
+        # операторе — том самом, ради которого дедупликация и заведена.
+        task.add_done_callback(partial(self._release_snapshot_inflight, size))
+        return await asyncio.shield(task)
+
+    @callback
+    def _release_snapshot_inflight(
+        self, size: tuple[int, int], task: asyncio.Task[bytes | None]
+    ) -> None:
+        """Убрать завершившуюся задачу, не тронув пришедшую ей на смену."""
+        if self._snapshot_inflight.get(size) is task:
+            self._snapshot_inflight.pop(size, None)
+
+    async def _async_fetch_snapshot_impl(self, size: tuple[int, int]) -> bytes | None:
+        """Один реальный запрос кадра у оператора."""
+        try:
+            image = await self.coordinator.get_camera_snapshot(self._id, *size)
+        except Exception as err:  # noqa: BLE001 - operator boundary
+            LOGGER.debug(
+                "Camera %s (%s): snapshot failed (%s)",
+                self._name,
+                self._id,
+                type(err).__name__,
+            )
+            image = None
+
+        # Вторая линия обороны к проверке статуса в `http.py`: в кэш попадает
+        # только то, что действительно кадр. Тело ошибки оператора — непустые
+        # байты, и без этой проверки оно залипало бы в кэше как «картинка».
+        if image and image[:2] == b"\xff\xd8":
+            if self._snapshot_failures:
+                LOGGER.info(
+                    "Camera %s (%s): оператор снова отдаёт снимки",
+                    self._name,
+                    self._id,
+                )
+            self._remember_snapshot(size, image)
+            self._snapshot_failures = 0
+            self._snapshot_retry_after = 0.0
+            return image
+
+        # Одна строка на отказ, а не на рендер: длительный отказ иначе не
+        # виден вообще — и A-102, и A-105 нашлись разбором прод-логов ровно
+        # по этому эндпоинту.
+        if self._snapshot_failures == 0:
+            LOGGER.warning(
+                "Camera %s (%s): оператор не отдаёт снимок, выдерживаем паузу",
+                self._name,
+                self._id,
+            )
+
+        # Счётчик общий на камеру, а не на размер: оператор отдаёт `531` на
+        # весь `/snapshots` камеры, и успех любого размера значит, что камера
+        # снова отвечает.
+        self._snapshot_failures += 1
+        exponent = min(self._snapshot_failures - 1, SNAPSHOT_RETRY_MAX_EXPONENT)
+        self._snapshot_retry_after = time.monotonic() + min(
+            SNAPSHOT_RETRY_INITIAL_SECONDS * 2**exponent,
+            SNAPSHOT_RETRY_MAX_SECONDS,
+        )
+
+        # Кадра нет — и подставлять здесь нечего. Вызывающий с карточки уже
+        # исчерпал и точный размер, и подстановку, прежде чем идти к
+        # оператору, а экран вызова кэш не устраивает вовсе: гость стоит у
+        # двери сейчас, и вид пятиминутной давности он бы от текущего не
+        # отличил.
+        return None
+
+    @callback
+    def _schedule_snapshot_refresh(self, size: tuple[int, int]) -> None:
+        """Обновить кадр в фоне, не задерживая ответ карточке."""
+        if self._snapshot_task is not None and not self._snapshot_task.done():
+            return
+
+        # Пока оператор в отказе, фоновое обновление тоже ждёт. Иначе пауза
+        # прикрывала только холодный старт, а бьёт по API как раз открытая
+        # карточка: она перерисовывается каждые несколько секунд, и каждый раз
+        # кадр уже устаревший — то есть ровно тот случай, ради которого пауза
+        # и заведена.
+        if time.monotonic() < self._snapshot_retry_after:
+            return
+
+        async def _run() -> None:
+            # Пока задача ждала очереди, камеру могли скрыть — тогда идти к
+            # оператору незачем (A-63).
+            if self._is_hidden() or not self.available:
+                return
+            try:
+                await self._async_fetch_snapshot(size)
+            except Exception as err:  # noqa: BLE001 - operator boundary
+                # Отказ оператора не должен всплывать из фоновой задачи:
+                # у карточки остаётся прошлый кадр, это лучше пустого места.
+                LOGGER.debug(
+                    "Camera %s (%s): background snapshot failed (%s)",
+                    self._name,
+                    self._id,
+                    type(err).__name__,
+                )
+
+        # Задача записи, а не hass: снимается при выгрузке и не держит
+        # startup-барьер.
+        self._snapshot_task = self._entry.async_create_background_task(
+            self.hass,
+            _run(),
+            name=f"{DOMAIN}_camera_snapshot_{self._id}",
+            eager_start=False,
+        )
+
+    async def stream_source(self) -> str | None:
+        """Return the source of the stream.
+
+        НЕ skip-аем для hidden (см. A-66v3). HA Stream lifecycle несовместим
+        с возвратом None после того как stream была активна — worker зависает.
+
+        A-68: dedup concurrent calls через future-pattern. HA Stream worker +
+        Frigate + Lovelace могут одновременно дёргать stream_source — без
+        dedup создаётся N HTTP к operator + N PATCH в go2rtc.
+        Concurrent callers wait first in-flight future → получают одинаковый
+        результат → 1 HTTP + 1 PATCH.
+        """
+        if self._inflight_stream_future is not None:
+            return await self._inflight_stream_future
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str | None] = loop.create_future()
+        self._inflight_stream_future = fut
+        try:
+            result = await self._fetch_stream_source_impl()
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            # Safety net: если future остался unresolved (например, exception
+            # пробросился до set_result/set_exception, или task cancelled
+            # между присваиванием _inflight_stream_future и try) — cancel-нём
+            # его, чтобы waiters не зависли навсегда.
+            if not fut.done():
+                fut.cancel()
+            self._inflight_stream_future = None
+
+    async def _fetch_stream_source_impl(self) -> str | None:
+        """Реальная логика fetch — operator stream URL + go2rtc PATCH.
+
+        Вызывается из `stream_source` под защитой in-flight future (A-68).
+        """
+        if self._stream_manager is not None:
+            result = await self._stream_manager.async_refresh(
+                self._id,
+                "ha_open",
+            )
+            stream_url = result.url
+        else:
+            result = None
+            stream_url = await self.coordinator.get_camera_stream(self._id)
+        if not stream_url:
+            # A-65: log throttling — 1й fail в серии WARNING, 2й+ DEBUG.
+            # Counter сбрасывается при первом успешном response.
+            self._consecutive_empty_count += 1
+            level = (
+                logging.WARNING if self._consecutive_empty_count == 1
+                else logging.DEBUG
+            )
+            LOGGER.log(
+                level,
+                "Camera %s (%s): empty source stream url",
+                self._name, self._id,
+            )
+            return None
+        self._consecutive_empty_count = 0
+        # Успешное открытие — свидетельство того, что оператор снова отвечает.
+        # Без сброса камера уносила бы накопленный получасовой интервал в уже
+        # здоровый период и ждала бы его до первой фоновой попытки.
+        self._note_recovery_outcome(recovered=True)
+        if result is None:
+            return stream_url
+        if not result.proxied:
+            # `result` не None только когда менеджер существует (см. выше);
+            # анализатор эти два факта не связывает.
+            state = self._stream_manager.camera_state(  # pyright: ignore[reportOptionalMemberAccess]
+                self._id
+            )
+            LOGGER.error(
+                "Camera %s (%s): go2rtc недоступен (%s); fallback на direct "
+                "operator URL. Проверь go2rtc_username/password в integration "
+                "config.",
+                self._name,
+                self._id,
+                state.status if state is not None else "unknown",
+            )
+            return stream_url
+        return stream_url
+
+    # ------------------------------------------------------------------ #
+    # Coordinator hook                                                   #
+    # ------------------------------------------------------------------ #
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Coordinator refresh — actuality берётся из property `available`."""
+        self.async_write_ha_state()
+
+    # ------------------------------------------------------------------ #
+    # Stream auto-recovery (A-71 / ADR-0009)                             #
+    # ------------------------------------------------------------------ #
+
+    async def async_create_stream(self) -> "Stream | None":
+        """Создать HA Stream и обернуть update-callback для auto-recovery.
+
+        Базовый `Camera` вешает `stream.set_update_callback(async_write_ha_state)`.
+        Мы оборачиваем callback своим `_on_stream_state_change`: сохраняем
+        `async_write_ha_state` + детектим переход stream в unavailable (operator
+        session истекла, ~30 мин — A-71) → throttled re-fetch свежего URL.
+        """
+        stream = await super().async_create_stream()
+        if stream is not None:
+            stream.set_update_callback(self._on_stream_state_change)
+        return stream
+
+    @callback
+    def _on_stream_state_change(self) -> None:
+        """Wrapped HA Stream update-callback (A-71).
+
+        HA Stream worker зовёт это при смене availability (`_set_state`).
+        Сохраняем штатный `async_write_ha_state`; при отказе worker'а
+        (`available == False`) планируем throttled recovery.
+        """
+        self.async_write_ha_state()
+        stream = self.stream
+        if stream is not None and not stream.available:
+            self._maybe_schedule_stream_recovery()
+
+    @callback
+    def _maybe_schedule_stream_recovery(
+        self, *, force_restart: bool = True
+    ) -> None:
+        """Запланировать recovery, если прошёл cooldown.
+
+        `force_restart=True` (default): event-driven recovery (v1/v2). Для
+        direct URL worker получает новый source через `Stream.update_source()`;
+        proxied worker сам retry-ит стабильный RTSP URL после manager PATCH.
+
+        `force_restart=False`: proactive (v3) — worker ещё работает; manager
+        делает PATCH-only refresh, restart не нужен, transition smooth.
+        """
+        now = time.monotonic()
+        if now - self._last_recovery_monotonic < self._recovery_cooldown:
+            return
+        self._last_recovery_monotonic = now
+        self.hass.async_create_background_task(
+            self._async_recover_stream(force_restart=force_restart),
+            name=f"{DOMAIN}_stream_recovery_{self._id}",
+        )
+
+    @property
+    def _recovery_cooldown(self) -> float:
+        """Пауза до следующей авто-recovery с учётом неудач подряд.
+
+        Ручное открытие камеры сюда не заходит: `stream_source()` идёт своим
+        путём и всегда пробует получить поток, сколько бы ни было неудач, —
+        backoff гасит только фоновые попытки.
+        """
+        if not self._recovery_failures:
+            return STREAM_RECOVERY_COOLDOWN
+        exponent = min(self._recovery_failures, STREAM_RECOVERY_MAX_EXPONENT)
+        return min(
+            STREAM_RECOVERY_COOLDOWN * 2**exponent,
+            STREAM_RECOVERY_BACKOFF_MAX,
+        )
+
+    @callback
+    def _note_recovery_outcome(self, *, recovered: bool) -> None:
+        """Учесть исход авто-recovery для backoff."""
+        if recovered:
+            if self._recovery_failures:
+                LOGGER.debug(
+                    "Camera %s (%s): stream recovered after %d failed attempt(s)",
+                    self._name,
+                    self._id,
+                    self._recovery_failures,
+                )
+            self._recovery_failures = 0
+            return
+        self._recovery_failures += 1
+        LOGGER.debug(
+            "Camera %s (%s): recovery attempt %d failed — next try in %.0fs",
+            self._name,
+            self._id,
+            self._recovery_failures,
+            self._recovery_cooldown,
+        )
+
+    async def _async_recover_stream(self, *, force_restart: bool = True) -> None:
+        """Re-fetch свежий operator URL + перенаправить источник (A-71).
+
+        Вызывается когда HA Stream worker сигналит unavailable (operator
+        forpost session истекла, ~30 мин — см. ADR-0009). Делает те же вызовы,
+        что HA на WebRTC re-offer / пользователь при reopen карточки:
+        manager refresh (PATCH go2rtc; HA retry-ит стабильный URL) либо прямой
+        `update_source` без go2rtc.
+        """
+        # `available` здесь = MyDomRuCamera.available, т.е.
+        # `CoordinatorEntity.available` (coordinator.last_update_success) И
+        # наличие камеры в coordinator.data. Это guard «не восстанавливать,
+        # если координатор down или камера выпала из снапшота» — НЕ проверка
+        # stream-availability (она перекрыта CoordinatorEntity.available).
+        if not self.available:
+            return
+        if self._stream_manager is not None:
+            result = await self._stream_manager.async_refresh(
+                self._id,
+                "recovery" if force_restart else "active_consumer",
+            )
+            if not result.url:
+                self._note_recovery_outcome(recovered=False)
+                LOGGER.debug(
+                    "Camera %s (%s): stream recovery got empty url — skip",
+                    self._name,
+                    self._id,
+                )
+                return
+            self._note_recovery_outcome(recovered=True)
+            # The proxied RTSP URL is stable: PATCH refreshed its upstream and
+            # HA Stream already retries the same URL after EOF. Calling
+            # update_source() here races HA's idle stop: its one-shot fast
+            # restart can consume the stop signal and orphan the worker.
+            return
+
+        try:
+            stream_url = await self.coordinator.get_camera_stream(self._id)
+        except Exception as err:  # noqa: BLE001 - sanitize operator boundary
+            self._note_recovery_outcome(recovered=False)
+            LOGGER.error(
+                "Camera %s (%s): stream recovery fetch failed (%s)",
+                self._name,
+                self._id,
+                type(err).__name__,
+            )
+            return
+        if not stream_url:
+            self._note_recovery_outcome(recovered=False)
+            LOGGER.debug(
+                "Camera %s (%s): stream recovery got empty url — skip",
+                self._name, self._id,
+            )
+            return
+        self._note_recovery_outcome(recovered=True)
+        LOGGER.debug(
+            "Camera %s (%s): auto-recovery — refreshing stalled stream "
+            "(force_restart=%s)",
+            self._name, self._id, force_restart,
+        )
+        try:
+            if self.stream is not None and force_restart:
+                self.stream.update_source(stream_url)
+        except Exception as err:  # noqa: BLE001 - sanitize operator URL
+            LOGGER.error(
+                "Camera %s (%s): recovery update_source failed (%s)",
+                self._name,
+                self._id,
+                type(err).__name__,
+            )
+
+    # ------------------------------------------------------------------ #
+    # go2rtc producer-health poll (A-71 v2 / ADR-0009)                   #
+    # ------------------------------------------------------------------ #
+
+    async def async_added_to_hass(self) -> None:
+        """Подписка на coordinator + (для go2rtc) запуск producer-health poll.
+
+        Event-driven recovery (`_on_stream_state_change`) ловит только camera с
+        активным legacy HA Stream worker (домофоны). go2rtc/WebRTC-only camera
+        (напр. лифты) такого сигнала не дают — для них poll'им go2rtc producer.
+        """
+        await super().async_added_to_hass()
+        if (
+            self._stream_manager is not None
+            and self._unsub_health_poll is None  # idempotent: не плодим таймеры
+        ):
+            self._unsub_health_poll = async_track_time_interval(
+                self.hass,
+                self._async_poll_go2rtc_health,
+                GO2RTC_HEALTH_POLL_INTERVAL,
+            )
+        # A-71 v3: proactive keep-alive refresh для streams с активными viewers.
+        if (
+            self._stream_manager is not None
+            and self._unsub_proactive_refresh is None
+        ):
+            self._unsub_proactive_refresh = async_track_time_interval(
+                self.hass,
+                self._async_proactive_refresh,
+                GO2RTC_PROACTIVE_REFRESH_INTERVAL,
+            )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Снять health-poll и proactive-refresh таймеры при удалении entity."""
+        if self._unsub_health_poll is not None:
+            self._unsub_health_poll()
+            self._unsub_health_poll = None
+        if self._unsub_proactive_refresh is not None:
+            self._unsub_proactive_refresh()
+            self._unsub_proactive_refresh = None
+        # Выгрузку записи покрывает ядро, удаление одной сущности — нет.
+        # Снимается обёртка; уже ушедший запрос доживает под `asyncio.shield`
+        # до ответа оператора — это цена дедупликации, один лишний запрос.
+        if self._snapshot_task is not None and not self._snapshot_task.done():
+            self._snapshot_task.cancel()
+        await super().async_will_remove_from_hass()
+
+    async def _fetch_go2rtc_stream_info(
+        self,
+    ) -> tuple[list[dict[str, Any]], Any] | None:
+        """GET go2rtc `/api/streams?src=<name>` → `(producers, consumers)`.
+
+        Возвращает None при сетевой ошибке / не-200 / не-JSON (graceful).
+        """
+        if self._stream_manager is None:
+            return None
+        info = await self._stream_manager.async_get_stream_info(self._id)
+        if info is None:
+            return None
+        return list(info.producers), [{} for _ in range(info.consumer_count)]
+
+    async def _async_poll_go2rtc_health(self, now: datetime | None = None) -> None:
+        """Детект stall по go2rtc producer `bytes_recv` (A-71 v2).
+
+        Живой forpost-producer непрерывно принимает байты. Если `bytes_recv` не
+        изменился с прошлого опроса **при наличии consumers** — producer мёртв
+        (operator session EOF), но go2rtc держит stale-producer → запускаем тот
+        же throttled recovery, что и event-driven путь. Покрывает камеры без
+        legacy HA Stream worker (go2rtc/WebRTC-only, напр. лифты).
+        """
+        if not self.available:
+            return
+        info = await self._fetch_go2rtc_stream_info()
+        if info is None:
+            return
+        producers, consumers = info
+        n_consumers = len(consumers) if isinstance(consumers, list) else 0
+        if n_consumers == 0 or not producers:
+            # Никто не смотрит → producer может быть idle легитимно; baseline сброс.
+            self._go2rtc_last_bytes_recv = None
+            return
+        cur = producers[0].get("bytes_recv")
+        if not isinstance(cur, int):
+            return
+        prev = self._go2rtc_last_bytes_recv
+        self._go2rtc_last_bytes_recv = cur
+        if prev is not None and cur == prev:
+            LOGGER.debug(
+                "Camera %s (%s): go2rtc producer frozen "
+                "(bytes_recv=%d, %d consumer(s)) — triggering recovery",
+                self._name, self._id, cur, n_consumers,
+            )
+            self._maybe_schedule_stream_recovery()
+            # Ре-baseline: после re-mint producer стартует заново.
+            self._go2rtc_last_bytes_recv = None
+
+    async def _async_proactive_refresh(
+        self, now: datetime | None = None
+    ) -> None:
+        """Proactive keep-alive refresh для активных streams (A-71 v3).
+
+        Запускается каждые `GO2RTC_PROACTIVE_REFRESH_INTERVAL` (28:30).
+        Архитектурное решение: НЕ ждать пока stream упадёт. Рефрешим до того
+        как backend закроет session, **только** для streams с активными
+        consumers (someone watching).
+
+        - consumers > 0 → есть viewer → refresh (избегаем stall в их видео).
+        - consumers == 0 → никто не смотрит → skip. При первом открытии
+          камеры HA go2rtc вызовет stream_source() → fresh fetch автоматически.
+
+        Cooldown общий с v1/v2: если кто-то уже re-mint'нул недавно, skip
+        (нет смысла рефрешить только что minted token).
+        """
+        if not self.available:
+            return
+        if (
+            self._stream_manager is not None
+            and self._stream_manager.is_camera_eligible(self._id)
+        ):
+            # Manager preload is not an external viewer. The manager owns the
+            # staggered 28:30 cadence for background-eligible cameras.
+            return
+        info = await self._fetch_go2rtc_stream_info()
+        if info is None:
+            return
+        producers, consumers = info
+        n_consumers = len(consumers) if isinstance(consumers, list) else 0
+        if n_consumers == 0:
+            # Никто не смотрит → skip; при первом открытии HA go2rtc дёрнет
+            # stream_source() → fresh fetch автоматически.
+            return
+        # Cooldown: общая throttle-метка с v1/v2 recovery.
+        now_mono = time.monotonic()
+        elapsed = now_mono - self._last_recovery_monotonic
+        # Минимальный возраст последнего refresh = половина интервала.
+        # Если v1/v2 пере-minted поток <12.5 мин назад — он ещё свежий, skip.
+        min_age = GO2RTC_PROACTIVE_REFRESH_INTERVAL.total_seconds() / 2
+        if elapsed < min_age:
+            LOGGER.debug(
+                "Camera %s (%s): proactive skip — recent refresh %.0fs ago (< %.0fs)",
+                self._name, self._id, elapsed, min_age,
+            )
+            return
+        LOGGER.debug(
+            "Camera %s (%s): proactive keep-alive refresh (%d consumer(s), "
+            "last refresh %.0fs ago)",
+            self._name, self._id, n_consumers, elapsed,
+        )
+        # CRITICAL v3.2: force_restart=False для proactive.
+        # PATCH-only manager write НЕ убивает running producer,
+        # `update_source()` HA Stream worker НЕ нужен. Existing consumers
+        # (WebRTC peers + preload) выживают, transition smooth при EOF.
+        self._maybe_schedule_stream_recovery(force_restart=False)

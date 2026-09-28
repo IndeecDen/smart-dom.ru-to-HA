@@ -1,0 +1,281 @@
+"""HTTP interface."""
+
+import asyncio
+from collections.abc import Callable
+from typing import Literal, assert_never
+
+from aiohttp import ClientError, ClientResponse, ClientTimeout
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from ._logging import redact, is_auth_path, redact_path
+from .const import (
+    BASE_API_URL,
+    LOGGER,
+)
+from .user_agent import UserAgent
+
+# A-21: явные таймауты на operator API. Без них shared HA-сессия использует
+# дефолт aiohttp (total≈5 мин), а refresh coordinator-а сериальный (~6 HTTP на
+# place) — один зависший запрос надолго тормозит tick / первый setup.
+# REST — короткий кап; binary (snapshot JPEG) — щедрее по total; connect-кап
+# даёт быстрый fail на недоступный хост. Retry/backoff сознательно вне scope
+# этого слайса (POST/login/open_lock не идемпотентны) — см. audit A-21.
+_REST_TIMEOUT = ClientTimeout(total=30, connect=10)
+_BINARY_TIMEOUT = ClientTimeout(total=60, connect=10)
+
+# Endpoints that the stock 9.9.0 client calls before authentication. Keep this
+# narrow: `/rest/v2/.../public/cameras` contains `public` but still requires a
+# Bearer token.
+_PREAUTH_PATH_PREFIXES = (
+    "/auth/",
+    "/api/mh-customer-device/mobile/public/",
+)
+
+
+def _log_request(url: str, method: str, headers: dict, body_size: int) -> None:
+    """Log outgoing request. Headers redacted; body NEVER logged.
+
+    Для auth-paths факт наличия body тоже не упоминаем (минимизируем сигнал).
+    Для остальных — реальный размер body в байтах.
+    """
+    if is_auth_path(url):
+        body_marker = "<auth-path-redacted>"
+    elif body_size > 0:
+        body_marker = f"<{body_size} bytes>"
+    else:
+        body_marker = "<none>"
+    # URL — через ту же редакцию, что и лог отказа: телефон стоит прямо в
+    # пути auth-запроса. Функция уже прятала заголовки и признак тела, но
+    # оставляла его на виду, а именно debug-логи люди прикладывают к issue.
+    LOGGER.debug(
+        "Request %s %s headers=%s body=%s",
+        method,
+        redact_path(url),
+        redact(headers),
+        body_marker,
+    )
+
+
+async def _log_response(response: ClientResponse) -> None:
+    """Log response status + length. Body НЕ логируется для auth-paths;
+    для остальных — только размер, не содержимое.
+    """
+    url = str(response.url)
+    if is_auth_path(url):
+        # Полностью пропускаем — даже размер ответа может намекать на исход (success vs error).
+        LOGGER.debug(
+            "Response %s %s [%s]", response.method, redact_path(url), response.status
+        )
+        return
+    # Не читаем body здесь — иначе streaming-ответы будут consumed.
+    # Размер берём из Content-Length, если есть.
+    content_length = response.headers.get("Content-Length", "?")
+    LOGGER.debug(
+        "Response %s %s [%s %s] content-length=%s",
+        response.method,
+        redact_path(url),
+        response.status,
+        response.reason,
+        content_length,
+    )
+
+
+def error_status(err: BaseException) -> int | None:
+    """Статус ответа оператора, если исключение его несёт.
+
+    Ответ лежит в аргументе исключения — так его кладёт `ClientError(response)`
+    здесь же. Прямая распаковка `err.args[0]` роняла `IndexError` на
+    исключениях без аргументов: таймаут или сетевая ошибка при входе
+    превращались не в понятное сообщение формы, а в «неизвестную ошибку» с
+    трассировкой, потому что config flow ловит только `ValueError`.
+    """
+    args = getattr(err, "args", ())
+    response = args[0] if args else None
+    return response.status if isinstance(response, ClientResponse) else None
+
+
+def is_unauthorized(err: BaseException) -> bool:
+    """Оператор отверг токен: нужна новая авторизация, а не повтор запроса."""
+    return error_status(err) == 401
+
+
+class HTTP:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        user_agent: UserAgent,
+        access_token: str | None,
+        refresh_token: str | None,
+        operator: str | None,
+    ) -> None:
+        self._hass = hass
+        self._base_url: str = f"https://{BASE_API_URL}"
+        self.user_agent: UserAgent = user_agent
+        self._headers: dict = {
+            "accept-encoding": "gzip",
+        }
+        if operator is not None:
+            self._headers["operator"] = operator
+        self.access_token: str | None = access_token
+        self._refresh_token: str | None = refresh_token
+        self._refresh_lock = asyncio.Lock()
+        self.on_tokens_refreshed: Callable[[str, str], None] | None = None
+
+    async def _async_refresh(self, rejected_token: str | None) -> bool:
+        """Refresh once per expired token, using the APK's Bearer header contract."""
+        if not self._refresh_token:
+            return False
+        async with self._refresh_lock:
+            if self.access_token != rejected_token:
+                return True
+            session = async_get_clientsession(self._hass)
+            headers = dict(self._headers)
+            headers.update({"user-agent": str(self.user_agent), "Bearer": self._refresh_token})
+            response = await session.get(
+                f"{self._base_url}/auth/v2/session/refresh",
+                headers=headers, timeout=_REST_TIMEOUT, allow_redirects=False,
+            )
+            try:
+                if response.status != 200:
+                    return False
+                try:
+                    payload = await response.json()
+                except (ValueError, ClientError):
+                    return False
+                if not isinstance(payload, dict):
+                    return False
+                access = payload.get("accessToken")
+                refresh = payload.get("refreshToken")
+                if not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh:
+                    return False
+                if self.on_tokens_refreshed is not None:
+                    self.on_tokens_refreshed(access, refresh)
+                self.access_token, self._refresh_token = access, refresh
+                return True
+            finally:
+                response.release()
+
+    async def __request(
+        self,
+        endpoint: str,
+        method: Literal["GET", "POST", "PUT", "DELETE"],
+        data: object | None,
+        binary: bool,
+        _retry_auth: bool = True,
+    ) -> ClientResponse | bytes:
+        """Make a HTTP request through shared HA aiohttp session.
+
+        См. ADR-0008. Не создаём свою ClientSession — это нарушение HA convention
+        (audit A-05, security S-05).
+        """
+        session = async_get_clientsession(self._hass)
+        request_token = self.access_token
+        url = f"{self._base_url}{endpoint}"
+
+        # Per-request headers (не накапливаем в self._headers, чтобы Authorization
+        # из прошлых запросов не утекал в pre-auth endpoints).
+        headers: dict[str, str] = dict(self._headers)
+        headers["user-agent"] = str(self.user_agent)
+        # content-type для тела (POST всегда; DELETE с телом — мирроринг
+        # subscriberNotifications-отписки, см. api.unregister_push_device).
+        if method in ("POST", "PUT") or (method == "DELETE" and data is not None):
+            headers["content-type"] = "application/json; charset=UTF-8"
+        # Bearer НЕ шлём на pre-auth endpoints — иначе backend может увидеть
+        # expired Bearer и отклонить reauth/bootstrap. HAR 9.9.0 подтверждает,
+        # что public device-installations также вызывается без Authorization.
+        is_preauth = any(
+            endpoint.startswith(prefix) for prefix in _PREAUTH_PATH_PREFIXES
+        )
+        if self.access_token is not None and not is_preauth:
+            headers["authorization"] = f"Bearer {self.access_token}"
+        # data может быть str/bytes/None. Размер считаем безопасно.
+        if data is None:
+            body_size = 0
+        elif isinstance(data, (bytes, bytearray)):
+            body_size = len(data)
+        else:
+            body_size = len(str(data).encode("utf-8"))
+        _log_request(url, method, headers, body_size)
+        timeout = _BINARY_TIMEOUT if binary else _REST_TIMEOUT
+        # Явный `raise` в конце, а не `else` у DELETE: аннотация `Literal`
+        # проверяется статически, но если её когда-нибудь расширят, метод не
+        # должен молча подмениться на удаление.
+        if method == "GET":
+            response = await session.get(url, headers=headers, timeout=timeout)
+        elif method == "POST":
+            response = await session.post(url, data=data, headers=headers, timeout=timeout)
+        elif method == "DELETE":
+            response = await session.delete(url, data=data, headers=headers, timeout=timeout)
+        elif method == "PUT":
+            response = await session.put(url, data=data, headers=headers, timeout=timeout)
+        else:
+            # Ветка недостижима, пока `Literal` исчерпан ветками выше, — и
+            # `assert_never` именно это и фиксирует: добавят метод в `Literal`,
+            # забыв ветку, — анализ упадёт здесь. В рантайме остаётся отказ, а
+            # не молчаливая подмена метода. Подавление ниже адресное: это
+            # единственное место, где недостижимость намеренная.
+            assert_never(method)  # pyright: ignore[reportUnreachable]
+
+        if response.status == 401 and _retry_auth and request_token and not is_preauth:
+            # GET is safe to replay. A mutation is never automatically repeated:
+            # refresh credentials for the next explicit invocation, report failure.
+            response.release()
+            if method == "GET" and await self._async_refresh(request_token):
+                return await self.__request(endpoint, method, data, binary, _retry_auth=False)
+
+        if binary:
+            # Статус проверяем и здесь: иначе тело ошибки оператора уходит
+            # вызывающему как «данные». Для снимка это означало картинку из
+            # JSON-текста ошибки, которую потребитель принимал за кадр.
+            if not response.ok:
+                # Уровень debug: статус уходит вызывающему исключением, а он
+                # уже решает, что это — отказ оператора на снимке (штатное
+                # дело, A-105) или настоящая поломка.
+                LOGGER.debug(
+                    "API binary request failed: %s [%s]",
+                    redact_path(endpoint),
+                    response.status,
+                )
+                raise ClientError(response)
+            return await response.read()
+
+        await _log_response(response)
+        if response.ok:
+            return response
+        else:
+            # `debug`, как и у бинарной ветки выше, и по той же причине:
+            # транспорт не знает, значим ли отказ. Решает вызывающий —
+            # координатор ограничивает жалобу по фронту с гранулярностью
+            # «вид данных + место», а config flow показывает причину в форме.
+            #
+            # Пробовал и промежуточное — жалобу по фронту прямо здесь. Не
+            # работает: ключ по пути схлопывает места, различающиеся
+            # query-строкой (`finance?placeId=`), и наоборот размножается на
+            # endpoint-ах с идентификатором в пути (архивная запись), где
+            # «отказ» — это штатное «клип старше срока хранения».
+            LOGGER.debug(
+                "API request failed: %s [%s]", redact_path(endpoint), response.status
+            )
+            raise ClientError(response)
+
+    async def get(self, endpoint: str, binary: bool = False) -> ClientResponse | bytes:
+        """Handle GET requests."""
+        return await self.__request(endpoint, method="GET", data=None, binary=binary)
+
+    async def post(
+        self, endpoint: str, data: object, binary: bool = False
+    ) -> ClientResponse | bytes:
+        """Handle POST requests."""
+        return await self.__request(endpoint, method="POST", data=data, binary=binary)
+
+    async def delete(
+        self, endpoint: str, data: object | None = None
+    ) -> ClientResponse | bytes:
+        """Handle DELETE requests (опц. тело — мирроринг отписки)."""
+        return await self.__request(endpoint, method="DELETE", data=data, binary=False)
+
+    async def put(self, endpoint: str, data: object | None = None) -> ClientResponse | bytes:
+        """Handle PUT used by the 9.10.0 application's camera/key settings."""
+        return await self.__request(endpoint, method="PUT", data=data, binary=False)

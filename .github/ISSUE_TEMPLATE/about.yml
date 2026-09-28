@@ -1,0 +1,22 @@
+---
+name: О проекте
+about: Что это за интеграция и на каких условиях работает.
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Умный Дом.ру для Home Assistant** — неофициальная интеграция
+        облака «Умный Дом.ру» (ЭР-Телеком) в Home Assistant. Домофон, камеры,
+        архив, входящий звонок с двусторонним звуком, история, баланс,
+        «Не беспокоить», временные пропуски, электронные ключи, настройки
+        камер, документы и обращения.
+
+        - Репозиторий: https://github.com/IndeecDen/smart-dom.ru-to-HA
+        - Установка: https://github.com/IndeecDen/smart-dom.ru-to-HA/blob/main/docs/INSTALL.md
+        - Реализовано и требует проверки: https://github.com/IndeecDen/smart-dom.ru-to-HA/blob/main/docs/FEATURES.md
+        - Лицензия: MIT. Основа — gentslava/elektronny-gorod.
+
+        Проект не связан с оператором. Полные условия — в
+        [DISCLAIMER.md](https://github.com/IndeecDen/smart-dom.ru-to-HA/blob/main/DISCLAIMER.md).

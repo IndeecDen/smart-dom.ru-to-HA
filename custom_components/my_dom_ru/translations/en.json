@@ -1,0 +1,831 @@
+{
+  "title": "Dom.ru Smart Home",
+  "common": {
+    "duration_min_sec": "{minutes} min {seconds} sec",
+    "duration_min": "{minutes} min",
+    "duration_sec": "{seconds} sec"
+  },
+  "issues": {
+    "fcm_receiver_unavailable": {
+      "title": "Doorbell notifications are unavailable for {entry_title}",
+      "description": "Doorbell calls are not reaching Home Assistant — account {entry_title}. Cameras, locks, balance and history work as usual.\n\nThe integration is already trying to reconnect. If this warning stays:\n\n1. Reload the account — that usually does it.\n2. Still there? Reconnect it.\n3. Still there? Update the integration and report the problem."
+    }
+  },
+  "config": {
+    "abort": {
+      "missing_phone": "Phone number is missing. Go back and enter your phone number.",
+      "missing_contract": "Contract is missing. Go back and select a contract.",
+      "missing_access_token": "Access token is missing. Please run the setup again.",
+      "already_configured": "Device is already configured",
+      "reauth_successful": "Re-authentication was successful",
+      "missing_entry_data": "Failed to store setup data. Please run the setup again.",
+      "no_contracts": "No contracts found for this phone number."
+    },
+    "error": {
+      "invalid_login": "Please check that the entered details are correct",
+      "invalid_phone": "Invalid phone number",
+      "no_contracts": "No contract found",
+      "unregistered": "This account is not registered",
+      "invalid_password": "Invalid password",
+      "invalid_format": "Invalid data format",
+      "limit_exceeded": "Request limit exceeded. Please try again later.",
+      "invalid_code": "Invalid code",
+      "go2rtc_required_fields": "Please fill in the go2rtc API URL field",
+      "go2rtc_invalid_url": "Invalid URL (could not determine host)",
+      "go2rtc_unreachable": "Could not connect to go2rtc (check the URL or network)",
+      "go2rtc_auth_failed": "go2rtc requires authentication (HTTP 401). Enter username/password, or disable auth on the go2rtc server, or uncheck \"Use go2rtc\" to save without connecting.",
+      "go2rtc_streams_api_failed": "go2rtc is reachable, but /api/streams is not writable (check configuration/permissions)",
+      "go2rtc_rtsp_port_closed": "go2rtc HTTP API is reachable, but the RTSP port (8554) is closed. Check firewall, bind address, or that go2rtc was built with RTSP support.",
+      "unknown_status": "Received an unknown response. Please create an issue.",
+      "unauthorized": "Authorization error",
+      "unknown": "Unexpected error",
+      "invalid_contract": "Selected contract is no longer available. Start over and pick again."
+    },
+    "step": {
+      "user": {
+        "data": {
+          "phone": "Phone or contract number"
+        },
+        "sections": {
+          "advanced": {
+            "name": "Advanced",
+            "description": "Skip the SMS flow if you already have an access token.",
+            "data": {
+              "access_token": "Access token"
+            }
+          }
+        }
+      },
+      "contract": {
+        "data": {
+          "contract": "Contracts"
+        },
+        "description": "Select a contract"
+      },
+      "sms": {
+        "data": {
+          "sms": "SMS code"
+        },
+        "description": "Enter the code from SMS"
+      },
+      "password": {
+        "data": {
+          "password": "Password"
+        },
+        "description": "Enter the password to log in"
+      },
+      "go2rtc_menu": {
+        "menu_options": {
+          "go2rtc": "Set up go2rtc (audio + more stable)",
+          "skip_go2rtc": "Skip"
+        }
+      },
+      "go2rtc": {
+        "title": "go2rtc setup",
+        "description": "If you enable go2rtc, video will play with audio via RTSP. External publishing is opt-in; disabled camera entities are never published, and hidden-camera publishing works only with the main publishing option.",
+        "data": {
+          "use_go2rtc": "Use go2rtc",
+          "go2rtc_base_url": "go2rtc API URL",
+          "go2rtc_rtsp_host": "RTSP host",
+          "go2rtc_username": "go2rtc username",
+          "go2rtc_password": "go2rtc password",
+          "go2rtc_keep_warm": "Publish enabled cameras for external RTSP",
+          "go2rtc_keep_warm_hidden": "Also publish hidden cameras"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "The operator rejected the saved token for {account}. Sign in again — cameras, locks and settings are kept.",
+        "data": {
+          "phone": "Phone or contract number"
+        },
+        "sections": {
+          "advanced": {
+            "name": "Advanced",
+            "description": "Skip the SMS flow if you already have an access token.",
+            "data": {
+              "access_token": "Access token"
+            }
+          }
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "go2rtc settings",
+        "description": "If you enable go2rtc, video will play with audio. External publishing is opt-in; disabled camera entities are never published, and hidden-camera publishing works only with the main publishing option.",
+        "data": {
+          "use_go2rtc": "Use go2rtc",
+          "go2rtc_base_url": "go2rtc API URL",
+          "go2rtc_username": "go2rtc username",
+          "go2rtc_password": "go2rtc password",
+          "go2rtc_keep_warm": "Publish enabled cameras for external RTSP",
+          "go2rtc_keep_warm_hidden": "Also publish hidden cameras"
+        }
+      }
+    },
+    "error": {
+      "go2rtc_required_fields": "Please fill in the go2rtc API URL field",
+      "go2rtc_invalid_url": "Invalid URL (could not determine host)",
+      "go2rtc_unreachable": "Could not connect to go2rtc (check the URL or network)",
+      "go2rtc_auth_failed": "go2rtc requires authentication (HTTP 401). Enter username/password, or disable auth on the go2rtc server, or uncheck \"Use go2rtc\" to save without connecting.",
+      "go2rtc_streams_api_failed": "go2rtc is reachable, but /api/streams is not writable (check configuration/permissions)",
+      "go2rtc_rtsp_port_closed": "go2rtc HTTP API is reachable, but the RTSP port (8554) is closed. Check firewall, bind address, or that go2rtc was built with RTSP support."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "balance": {
+        "name": "Account balance",
+        "state_attributes": {
+          "amount_sum": {
+            "name": "Amount due"
+          },
+          "target_date": {
+            "name": "Payment date"
+          },
+          "payment_link": {
+            "name": "Payment link"
+          },
+          "blocked": {
+            "name": "Account blocked"
+          }
+        }
+      },
+      "days_to_block": {
+        "name": "Days to block"
+      },
+      "go2rtc_rtsp_urls": {
+        "name": "Published RTSP streams"
+      },
+      "call_state": {
+        "name": "Call state",
+        "state": {
+          "idle": "No call",
+          "ringing": "Incoming call",
+          "connecting": "Connecting",
+          "active": "In call",
+          "ended": "Ended",
+          "error": "Error"
+        }
+      }
+    },
+    "binary_sensor": {
+      "blocked": {
+        "name": "Account blocked"
+      }
+    },
+    "event": {
+      "doorbell": {
+        "name": "Doorbell call",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "ring": "Ring",
+              "ended": "Ended"
+            }
+          }
+        }
+      },
+      "access_history": {
+        "name": "Intercom call history",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "call_accepted": "Call accepted",
+              "call_missed": "Call missed"
+            }
+          }
+        }
+      },
+      "account_history": {
+        "name": "Event history",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "call_accepted": "Call accepted",
+              "call_missed": "Call missed"
+            }
+          }
+        }
+      },
+      "camera_history": {
+        "name": "Motion history",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "motion": "Motion"
+            }
+          }
+        }
+      }
+    },
+    "lock": {
+      "lock": {
+        "name": "Lock",
+        "state_attributes": {
+          "place_id": {
+            "name": "Place ID"
+          },
+          "access_control_id": {
+            "name": "Access control ID"
+          },
+          "entrance_id": {
+            "name": "Entrance ID"
+          },
+          "name": {
+            "name": "Intercom name"
+          },
+          "openable": {
+            "name": "Can be opened"
+          }
+        }
+      }
+    },
+    "switch": {
+      "dnd_root": {
+        "name": "Do not disturb"
+      },
+      "dnd_intercom_calls": {
+        "name": "Mute intercom calls"
+      },
+      "dnd_management_company_calls": {
+        "name": "Mute management company calls"
+      }
+    }
+  },
+  "services": {
+    "answer": {
+      "name": "Answer doorbell call",
+      "description": "Answer the currently ringing intercom call and start two-way audio."
+    },
+    "hangup": {
+      "name": "Hang up doorbell call",
+      "description": "End the active intercom call."
+    },
+    "get_inventory": {
+      "name": "Places and device IDs",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "list_temp_passes": {
+      "name": "List temporary passes",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "temp_pass_options": {
+      "name": "Eligible doors for a temporary pass",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "temp_pass_lifetimes": {
+      "name": "Available pass lifetimes",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "create_temp_pass": {
+      "name": "Create a temporary pass",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "ttl": {
+          "name": "Lifetime",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "access_control_ids": {
+          "name": "Access control IDs",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "delete_temp_pass": {
+      "name": "Delete a temporary pass",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "pass_id": {
+          "name": "Pass ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "list_access_keys": {
+      "name": "List access keys",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "add_access_key": {
+      "name": "Add an access key",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "key_code": {
+          "name": "Key code",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "delete_access_key": {
+      "name": "Delete an access key",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "key_id": {
+          "name": "Key service ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "key_code": {
+          "name": "Key code",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "reactivate_access_key": {
+      "name": "Reactivate an access key",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "key_id": {
+          "name": "Key service ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "key_code": {
+          "name": "Key code",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "rename_access_key": {
+      "name": "Rename an access key",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "key_id": {
+          "name": "Key service ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "toggle_key_notifications": {
+      "name": "Toggle key notifications",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "key_id": {
+          "name": "Key service ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_motion_parameters": {
+      "name": "Camera motion settings",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_set_sensitivity": {
+      "name": "Set motion sensitivity",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "sensitivity": {
+          "name": "Sensitivity",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_set_recording": {
+      "name": "Set camera recording",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "mode": {
+          "name": "Recording mode",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_set_event_recording": {
+      "name": "Set event recording",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "enabled": {
+          "name": "Enabled",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_rename": {
+      "name": "Rename a camera",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_mirror": {
+      "name": "Mirror a camera image",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "axis": {
+          "name": "Mirror axis",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_ptz": {
+      "name": "Start or stop camera movement",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "direction": {
+          "name": "Direction",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "movement": {
+          "name": "Movement",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_audio_volumes": {
+      "name": "Camera audio volume settings",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_set_microphone_volume": {
+      "name": "Set camera microphone volume",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "volume": {
+          "name": "Volume",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_set_speaker_volume": {
+      "name": "Set camera speaker volume",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "camera_id": {
+          "name": "Internal camera ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "volume": {
+          "name": "Volume",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "camera_features": {
+      "name": "Camera features",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "get_finances": {
+      "name": "Financial information",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "list_requests": {
+      "name": "List maintenance requests",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "page": {
+          "name": "Page",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "list_documents": {
+      "name": "List documents",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "get_screen_sections": {
+      "name": "App sections for a place",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "create_maintenance_request": {
+      "name": "Create a maintenance request",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "phone": {
+          "name": "Phone",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "full_name": {
+          "name": "Full name",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "message": {
+          "name": "Message",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    },
+    "acknowledge_document": {
+      "name": "Acknowledge a document",
+      "description": "Administrator action. Requires device and subscription support.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Account",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "place_id": {
+          "name": "Place ID",
+          "description": "Use the matching ID or value returned by this integration."
+        },
+        "document_id": {
+          "name": "Document ID",
+          "description": "Use the matching ID or value returned by this integration."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "cannot_lock": {
+      "message": "The intercom cannot be locked: the latch is released by the hardware and locks itself after a few seconds."
+    },
+    "cannot_unlock": {
+      "message": "The intercom did not open: the operator rejected the request or is unreachable."
+    },
+    "no_active_call": {
+      "message": "No incoming intercom call right now — there is nothing to answer or hang up."
+    },
+    "dnd_unavailable": {
+      "message": "Do Not Disturb settings are not loaded yet — try again in a moment."
+    },
+    "dnd_rejected": {
+      "message": "The operator did not accept the Do Not Disturb change."
+    },
+    "integration_not_loaded": {
+      "message": "The Dom.ru Smart Home integration is not loaded right now."
+    }
+  }
+}

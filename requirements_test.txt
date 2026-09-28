@@ -1,0 +1,2 @@
+# Linux + Python 3.14, matching the inherited HA lifecycle suite.
+pytest-homeassistant-custom-component==0.13.362

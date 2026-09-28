@@ -1,0 +1,501 @@
+# tests/test_call_camera.py
+import asyncio
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from custom_components.my_dom_ru.call_camera import MyDomRuCallCamera
+from custom_components.my_dom_ru.const import (
+    CALL_STATE_ENDED,
+    CALL_STATE_ERROR,
+    EVENT_CALL_STATE,
+)
+from homeassistant.core import Event
+
+_CC = "custom_components.my_dom_ru.call_camera"
+
+
+def _cam(controller, doorbell_lookup, entry_id="e1"):
+    return MyDomRuCallCamera(
+        controller_getter=lambda: controller,
+        go2rtc_base_url="http://g:1984",
+        go2rtc_headers={}, rtsp_host="127.0.0.1",
+        doorbell_lookup=doorbell_lookup,
+        entry_id=entry_id,
+    )
+
+
+async def test_stream_source_none_without_active_call():
+    c = MagicMock(); c.active_call_media.return_value = None
+    cam = _cam(c, lambda cid: None)
+    assert await cam.stream_source() is None
+
+
+async def test_stream_source_none_when_controller_not_ready():
+    """controller_getter() возвращает None (контроллер ещё не создан) → None без падения."""
+    cam = MyDomRuCallCamera(
+        controller_getter=lambda: None,
+        go2rtc_base_url="http://g:1984",
+        go2rtc_headers={}, rtsp_host="127.0.0.1",
+        doorbell_lookup=lambda cid: None,
+        entry_id="e1",
+    )
+    assert await cam.stream_source() is None
+
+
+async def test_stream_source_builds_fresh_combined_and_returns_rtsp():
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:http://1.2.3.4:40020#audio=aac#audio=opus"
+    c = MagicMock(); c.active_call_media.return_value = ("1013", bridge)
+    doorbell = MagicMock()
+    doorbell.stream_source = AsyncMock(return_value="rtsp://127.0.0.1:8554/mdr_1013")
+    upsert = AsyncMock()
+    cam = _cam(c, lambda cid: doorbell if cid == "1013" else None)
+    with patch(f"{_CC}.upsert_audio_stream", new=upsert), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        url = await cam.stream_source()
+    doorbell.stream_source.assert_awaited_once()  # bootstrap видео-источника (mock doorbell)
+    # mdr_intercom_call собран: свежее видео (copy) + аудио моста
+    srcs = upsert.await_args.args[2]
+    assert srcs == [
+        "rtsp://127.0.0.1:8554/mdr_1013#video=copy",
+        "ffmpeg:http://1.2.3.4:40020#audio=aac#audio=opus",
+    ]
+    assert url == "rtsp://127.0.0.1:8554/mdr_intercom_call"
+
+
+async def test_unique_id_includes_entry_id():
+    """unique_id должен содержать entry_id для scoping по entry."""
+    c = MagicMock()
+    cam = _cam(c, lambda cid: None, entry_id="abc123")
+    assert cam.unique_id == "my_dom_ru_abc123_intercom_call"
+
+
+async def test_stream_source_none_when_no_doorbell_for_camera_id():
+    """Нет doorbell-камеры для данного camera_id → None."""
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:http://1.2.3.4:40020#audio=aac"
+    c = MagicMock(); c.active_call_media.return_value = ("999", bridge)
+    cam = _cam(c, lambda cid: None)  # doorbell не найден
+    assert await cam.stream_source() is None
+
+
+async def test_stream_source_none_when_doorbell_stream_source_empty():
+    """doorbell.stream_source() вернул None → None из call camera."""
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:http://1.2.3.4:40020#audio=aac"
+    c = MagicMock(); c.active_call_media.return_value = ("1013", bridge)
+    doorbell = MagicMock()
+    doorbell.stream_source = AsyncMock(return_value=None)
+    upsert = AsyncMock()
+    cam = _cam(c, lambda cid: doorbell)
+    with patch(f"{_CC}.upsert_audio_stream", new=upsert), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        result = await cam.stream_source()
+    assert result is None
+    upsert.assert_not_awaited()
+
+
+async def test_stream_source_none_when_upsert_fails():
+    """upsert стрима упал (напр. раздутый go2rtc-конфиг) → None, а не мёртвый URL (404)."""
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:http://1.2.3.4:40020#audio=aac"
+    c = MagicMock(); c.active_call_media.return_value = ("1013", bridge)
+    doorbell = MagicMock()
+    doorbell.stream_source = AsyncMock(return_value="rtsp://127.0.0.1:8554/mdr_1013")
+    upsert = AsyncMock(side_effect=RuntimeError("go2rtc audio PUT failed: HTTP 400"))
+    cam = _cam(c, lambda cid: doorbell)
+    with patch(f"{_CC}.upsert_audio_stream", new=upsert), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        result = await cam.stream_source()
+    assert result is None
+
+
+async def test_available_only_during_active_call():
+    """available=True только при активном вызове (иначе HA не стримит → нет вечных 404)."""
+    c = MagicMock()
+    c.active_call_media.return_value = None
+    cam = _cam(c, lambda cid: None)
+    assert cam.available is False
+    c.active_call_media.return_value = ("1013", MagicMock())
+    assert cam.available is True
+
+
+async def test_available_false_when_controller_none():
+    cam = MyDomRuCallCamera(
+        controller_getter=lambda: None,
+        go2rtc_base_url="http://g:1984",
+        go2rtc_headers={}, rtsp_host="127.0.0.1",
+        doorbell_lookup=lambda cid: None,
+        entry_id="e1",
+    )
+    assert cam.available is False
+
+
+async def test_camera_image_delegates_to_doorbell_snapshot():
+    """async_camera_image → снапшот камеры домофона (не NotImplementedError)."""
+    c = MagicMock()
+    c.active_call_media.return_value = ("1013", MagicMock())
+    doorbell = MagicMock()
+    doorbell.async_fresh_camera_image = AsyncMock(return_value=b"jpmdr-bytes")
+    cam = _cam(c, lambda cid: doorbell if cid == "1013" else None)
+    img = await cam.async_camera_image(300, 200)
+    assert img == b"jpmdr-bytes"
+    doorbell.async_fresh_camera_image.assert_awaited_once_with(300, 200)
+
+
+async def test_call_screen_snapshot_bypasses_cache():
+    """Экран вызова показывает живой кадр, а не последний просмотренный.
+
+    Гость стоит у двери сейчас; кадр из кэша показал бы прошлое. Приложение
+    оператора в этот момент тоже перезапрашивает снимок (api-reference).
+    """
+    c = MagicMock()
+    c.active_call_media.return_value = ("1013", MagicMock())
+    doorbell = MagicMock()
+    doorbell.async_fresh_camera_image = AsyncMock(return_value=b"live")
+    doorbell.async_camera_image = AsyncMock(return_value=b"cached")
+    cam = _cam(c, lambda cid: doorbell if cid == "1013" else None)
+
+    assert await cam.async_camera_image(300, 200) == b"live"
+    doorbell.async_camera_image.assert_not_awaited()
+
+
+async def test_mjpmdr_fallback_does_not_poll_the_operator_at_stream_rate():
+    """MJPEG-фолбэк экрана вызова не гоняет оператора по кадру за полсекунды.
+
+    Кадр здесь идёт мимо кэша и мимо паузы, то есть каждый оборот лупа ядра —
+    настоящий запрос. На дефолтном интервале это две штуки в секунду на всё
+    время разговора, и ровно тот `/snapshots`, который под нагрузкой отдаёт
+    отказ.
+    """
+    cam = _cam(MagicMock(), lambda cid: None)
+
+    # Верхняя граница тоже нужна: без неё «живой вид» гостя вырождается в
+    # стоп-кадр на весь разговор, и тест этого не заметит.
+    assert 1.0 <= cam.frame_interval <= 5.0
+
+
+async def test_camera_image_none_without_active_call():
+    """Вне вызова — None (нет кадра), без NotImplementedError."""
+    c = MagicMock()
+    c.active_call_media.return_value = None
+    cam = _cam(c, lambda cid: None)
+    assert await cam.async_camera_image() is None
+
+
+def test_on_call_state_writes_ha_state():
+    """EVENT_CALL_STATE → запись состояния (чтобы фронт увидел смену available)."""
+    c = MagicMock()
+    c.active_call_media.return_value = None
+    cam = _cam(c, lambda cid: None)
+    cam.async_write_ha_state = MagicMock()
+    cam._on_call_state(MagicMock())
+    cam.async_write_ha_state.assert_called_once()
+
+
+async def test_stream_source_dedup_same_call_no_rebuild():
+    """A-88: повторный stream_source в пределах одного звонка НЕ пересобирает стрим
+    (второй клиент/WebRTC re-offer подключается к тому же продюсеру)."""
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:http://1.2.3.4:40020#audio=aac#audio=opus"
+    c = MagicMock(); c.active_call_media.return_value = ("1013", bridge)
+    doorbell = MagicMock()
+    doorbell.stream_source = AsyncMock(return_value="rtsp://127.0.0.1:8554/mdr_1013")
+    upsert = AsyncMock()
+    cam = _cam(c, lambda cid: doorbell)
+    with patch(f"{_CC}.upsert_audio_stream", new=upsert), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        url1 = await cam.stream_source()
+        url2 = await cam.stream_source()  # тот же звонок (тот же bridge)
+    assert url1 == url2 == "rtsp://127.0.0.1:8554/mdr_intercom_call"
+    assert upsert.await_count == 1  # собрано ОДИН раз
+    assert doorbell.stream_source.await_count == 1  # operator-URL не пере-фетчен
+
+
+async def test_stream_source_concurrent_opens_deduped():
+    """A-88: два ОДНОВРЕМЕННЫХ первых открытия (warm-up + фронтенд) собирают стрим
+    один раз — второй ждёт in-flight future, а не пере-собирает (double upsert)."""
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:audio"
+    c = MagicMock(); c.active_call_media.return_value = ("1013", bridge)
+    gate = asyncio.Event()
+
+    async def slow_stream_source():
+        await gate.wait()  # держим первую сборку, пока не войдёт вторая
+        return "rtsp://127.0.0.1:8554/mdr_1013"
+
+    doorbell = MagicMock()
+    doorbell.stream_source = AsyncMock(side_effect=slow_stream_source)
+    upsert = AsyncMock()
+    cam = _cam(c, lambda cid: doorbell)
+    with patch(f"{_CC}.upsert_audio_stream", new=upsert), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        t1 = asyncio.create_task(cam.stream_source())
+        t2 = asyncio.create_task(cam.stream_source())
+        await asyncio.sleep(0.01)  # оба вошли: t1 занял future, t2 ждёт его
+        gate.set()
+        url1, url2 = await asyncio.gather(t1, t2)
+    assert url1 == url2 == "rtsp://127.0.0.1:8554/mdr_intercom_call"
+    assert upsert.await_count == 1  # собрано ОДИН раз, второй ждал future
+    assert doorbell.stream_source.await_count == 1  # operator-URL не пере-фетчен
+
+
+async def test_stream_source_rebuilds_on_new_call():
+    """Новый звонок (новый bridge) → пересборка; кэш сбрасывается между звонками."""
+    b1 = MagicMock(); b1.go2rtc_src = "ffmpeg:a"
+    b2 = MagicMock(); b2.go2rtc_src = "ffmpeg:b"
+    c = MagicMock()
+    doorbell = MagicMock()
+    doorbell.stream_source = AsyncMock(return_value="rtsp://127.0.0.1:8554/mdr_1013")
+    upsert = AsyncMock()
+    cam = _cam(c, lambda cid: doorbell)
+    with patch(f"{_CC}.upsert_audio_stream", new=upsert), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        c.active_call_media.return_value = ("1013", b1)
+        await cam.stream_source()
+        c.active_call_media.return_value = None  # звонок кончился → сброс кэша
+        await cam.stream_source()
+        c.active_call_media.return_value = ("1013", b2)  # новый звонок
+        await cam.stream_source()
+    assert upsert.await_count == 2  # пересобрано на новый звонок, не на каждое открытие
+
+
+async def test_teardown_on_ended_removes_stream_and_clears_cache():
+    """A-88 A1: на `ended` снимаем go2rtc-стрим и сбрасываем кэш."""
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:http://1.2.3.4:40020#audio=aac"
+    c = MagicMock(); c.active_call_media.return_value = ("1013", bridge)
+    doorbell = MagicMock()
+    doorbell.stream_source = AsyncMock(return_value="rtsp://127.0.0.1:8554/mdr_1013")
+    remove = AsyncMock()
+    cam = _cam(c, lambda cid: doorbell)
+    session = MagicMock()
+    with patch(f"{_CC}.upsert_audio_stream", new=AsyncMock()), patch(
+        f"{_CC}.remove_audio_stream", new=remove
+    ), patch(f"{_CC}.async_get_clientsession", return_value=session):
+        cam.hass = MagicMock()
+        await cam.stream_source()
+        assert cam._call_stream_cache is not None
+        await cam._teardown_call_stream()
+    assert cam._call_stream_cache is None
+    remove.assert_awaited_once_with(
+        "http://g:1984", "mdr_intercom_call", session, {}
+    )
+
+
+async def test_teardown_idempotent_after_ended():
+    """Повторный teardown идемпотентен (best-effort remove)."""
+    cam = _cam(MagicMock(), lambda cid: None)
+    remove = AsyncMock()
+    with patch(f"{_CC}.remove_audio_stream", new=remove), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        await cam._teardown_call_stream()
+        await cam._teardown_call_stream()
+    assert remove.await_count == 2
+
+
+async def test_stream_source_none_after_teardown():
+    """После teardown и конца вызова stream_source → None."""
+    c = MagicMock(); c.active_call_media.return_value = None
+    cam = _cam(c, lambda cid: None)
+    cam._call_stream_cache = (1, "rtsp://127.0.0.1:8554/mdr_intercom_call")
+    assert await cam.stream_source() is None
+    assert cam._call_stream_cache is None
+
+
+async def test_on_call_state_schedules_teardown_on_ended():
+    """EVENT_CALL_STATE `ended` → задача teardown."""
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = MagicMock()
+    cam.async_write_ha_state = MagicMock()
+    created: list = []
+
+    def _capture(coro):
+        created.append(coro)
+        return MagicMock()
+
+    cam.hass.async_create_task.side_effect = _capture
+    with patch(f"{_CC}.remove_audio_stream", new=AsyncMock()), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam._on_call_state(Event(EVENT_CALL_STATE, {"state": CALL_STATE_ENDED}))
+        assert len(created) == 1
+        await created[0]
+    cam.async_write_ha_state.assert_called_once()
+
+
+async def test_on_call_state_schedules_teardown_on_error():
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = MagicMock()
+    cam.async_write_ha_state = MagicMock()
+    created: list = []
+
+    def _capture(coro):
+        created.append(coro)
+        return MagicMock()
+
+    cam.hass.async_create_task.side_effect = _capture
+    with patch(f"{_CC}.remove_audio_stream", new=AsyncMock()), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam._on_call_state(Event(EVENT_CALL_STATE, {"state": CALL_STATE_ERROR}))
+        assert len(created) == 1
+        await created[0]
+
+
+async def test_stream_source_uses_shared_go2rtc_rtsp_not_operator_pull():
+    """A-88 A3: call stream берёт RTSP mdr_<id> через async_go2rtc_video_rtsp."""
+    from custom_components.my_dom_ru.camera import MyDomRuCamera
+
+    bridge = MagicMock(); bridge.go2rtc_src = "ffmpeg:http://1.2.3.4:40020#audio=aac#audio=opus"
+    c = MagicMock(); c.active_call_media.return_value = ("1013", bridge)
+    doorbell = MyDomRuCamera.__new__(MyDomRuCamera)
+    doorbell.async_go2rtc_video_rtsp = AsyncMock(
+        return_value="rtsp://127.0.0.1:8554/mdr_1013"
+    )
+    doorbell.stream_source = AsyncMock()
+    upsert = AsyncMock()
+    cam = _cam(c, lambda cid: doorbell if cid == "1013" else None)
+    with patch(f"{_CC}.upsert_audio_stream", new=upsert), patch(
+        f"{_CC}.async_get_clientsession", return_value=MagicMock()
+    ):
+        cam.hass = MagicMock()
+        url = await cam.stream_source()
+    doorbell.async_go2rtc_video_rtsp.assert_awaited_once()
+    doorbell.stream_source.assert_not_awaited()
+    srcs = upsert.await_args.args[2]
+    assert srcs[0] == "rtsp://127.0.0.1:8554/mdr_1013#video=copy"
+    assert url == "rtsp://127.0.0.1:8554/mdr_intercom_call"
+
+
+# ─── Прогрев и снятие стрима вызова ─────────────────────────────────────────
+
+
+async def _bridge_ready(cam, url: str = "rtsp://127.0.0.1:8554/mdr_intercom_call"):
+    """Подменить сборку стрима готовым адресом."""
+    cam.stream_source = AsyncMock(return_value=url)
+
+
+async def test_warm_up_nudges_go2rtc_before_the_card_opens(hass) -> None:
+    """Стрим собирается и прогревается заранее, до открытия карточки.
+
+    Иначе видео вызова поднимается с задержкой в несколько секунд — ровно
+    тогда, когда человек смотрит, кто пришёл.
+    """
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = hass
+    await _bridge_ready(cam)
+    session = MagicMock()
+    response = MagicMock()
+    response.read = AsyncMock(return_value=b"jpeg")
+    session.get.return_value.__aenter__ = AsyncMock(return_value=response)
+    session.get.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    with patch(f"{_CC}.async_get_clientsession", return_value=session):
+        await cam._warm_up()
+
+    probe_url = session.get.call_args.args[0]
+    assert "frame.jpeg" in probe_url and "mdr_intercom_call" in probe_url
+
+
+async def test_warm_up_without_a_stream_does_nothing(hass) -> None:
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = hass
+    cam.stream_source = AsyncMock(return_value=None)
+    with patch(f"{_CC}.async_get_clientsession") as session:
+        await cam._warm_up()
+    session.assert_not_called()
+
+
+async def test_warm_up_failure_does_not_break_the_call(hass) -> None:
+    """Прогрев — необязательный шаг: его отказ не должен рушить приём вызова."""
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = hass
+    cam.stream_source = AsyncMock(side_effect=RuntimeError("go2rtc недоступен"))
+
+    await cam._warm_up()  # не должно бросить
+
+
+async def test_teardown_removes_the_call_stream(hass) -> None:
+    """После звонка стрим снимается — иначе HA бесконечно ретраит мёртвый."""
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = hass
+    cam._call_stream_cache = ("bridge", "rtsp://x")
+
+    with (
+        patch(f"{_CC}.async_get_clientsession", return_value=MagicMock()),
+        patch(f"{_CC}.remove_audio_stream", new=AsyncMock()) as remove,
+    ):
+        await cam._teardown_call_stream()
+
+    remove.assert_awaited_once()
+    assert cam._call_stream_cache is None
+
+
+async def test_teardown_failure_is_swallowed(hass) -> None:
+    """Снятие стрима — best-effort: его отказ не должен всплывать наверх."""
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = hass
+
+    with (
+        patch(f"{_CC}.async_get_clientsession", return_value=MagicMock()),
+        patch(f"{_CC}.remove_audio_stream", new=AsyncMock(side_effect=RuntimeError)),
+    ):
+        await cam._teardown_call_stream()
+
+
+async def test_teardown_without_go2rtc_is_a_noop(hass) -> None:
+    cam = MyDomRuCallCamera(
+        controller_getter=lambda: None,
+        go2rtc_base_url="",
+        go2rtc_headers={}, rtsp_host="127.0.0.1",
+        doorbell_lookup=lambda cid: None,
+        entry_id="e1",
+    )
+    cam.hass = hass
+    cam._call_stream_cache = ("bridge", "rtsp://x")
+
+    await cam._teardown_call_stream()
+
+    assert cam._call_stream_cache is None
+
+
+async def test_stream_build_failure_reaches_every_waiter(hass) -> None:
+    """Сбой сборки стрима доезжает до всех, кто её ждал.
+
+    Прогрев и открытие карточки идут одновременно и делят одну сборку.
+    Проглотить исключение значило бы, что второй ждущий завис бы навсегда.
+    """
+    controller = MagicMock()
+    bridge = MagicMock(go2rtc_src="ffmpeg:http://x")
+    controller.active_call_media.return_value = ("100", bridge)
+    cam = _cam(controller, lambda cid: MagicMock())
+    cam.hass = hass
+    cam._build_call_stream = AsyncMock(side_effect=RuntimeError("go2rtc упал"))
+
+    with pytest.raises(RuntimeError):
+        await cam.stream_source()
+
+    assert cam._inflight_stream_future is None, "сборка не должна залипнуть"
+
+
+async def test_answered_call_warms_the_stream_up(hass) -> None:
+    """На ответе стрим начинает собираться заранее, не дожидаясь карточки."""
+    from custom_components.my_dom_ru.const import CALL_STATE_ACTIVE
+
+    cam = _cam(MagicMock(), lambda cid: None)
+    cam.hass = hass
+    cam.async_write_ha_state = MagicMock()
+    cam._warm_up = AsyncMock()
+
+    cam._on_call_state(MagicMock(data={"state": CALL_STATE_ACTIVE}))
+    await hass.async_block_till_done()
+
+    cam._warm_up.assert_awaited_once()

@@ -1,0 +1,831 @@
+{
+  "title": "Умный Дом.ру",
+  "common": {
+    "duration_min_sec": "{minutes} мин {seconds} сек",
+    "duration_min": "{minutes} мин",
+    "duration_sec": "{seconds} сек"
+  },
+  "issues": {
+    "fcm_receiver_unavailable": {
+      "title": "Уведомления о звонках недоступны: {entry_title}",
+      "description": "Звонки с домофона пока не доходят до Home Assistant — аккаунт {entry_title}. Камеры, замки, баланс и история работают как обычно.\n\nИнтеграция сама пытается восстановить связь. Если предупреждение осталось:\n\n1. Перезагрузите аккаунт — обычно этого хватает.\n2. Не помогло — переподключите его.\n3. Всё ещё нет — обновите интеграцию и сообщите об ошибке."
+    }
+  },
+  "config": {
+    "abort": {
+      "missing_phone": "Не указан номер телефона. Вернитесь на предыдущий шаг и введите номер.",
+      "missing_contract": "Не выбран договор. Вернитесь на предыдущий шаг и выберите договор.",
+      "missing_access_token": "Отсутствует токен доступа. Попробуйте пройти настройку заново.",
+      "already_configured": "Устройство уже настроено",
+      "reauth_successful": "Повторная аутентификация прошла успешно",
+      "missing_entry_data": "Не удалось сохранить данные настройки. Попробуйте пройти настройку заново.",
+      "no_contracts": "Для этого номера телефона не найдено ни одного договора."
+    },
+    "error": {
+      "invalid_login": "Проверьте правильность введенных данных",
+      "invalid_phone": "Некорректный номер телефона",
+      "no_contracts": "Не найден договор",
+      "unregistered": "Данный аккаунт не зарегистрирован",
+      "invalid_password": "Неверный пароль",
+      "invalid_format": "Некорректный формат данных",
+      "limit_exceeded": "Превышен лимит обращений. Пожалуйста, повторите попытку позже.",
+      "invalid_code": "Неверный код",
+      "go2rtc_required_fields": "Заполните поле go2rtc API URL",
+      "go2rtc_invalid_url": "Некорректный URL (не удалось определить host)",
+      "go2rtc_unreachable": "Не удалось подключиться к go2rtc (проверьте URL или сеть)",
+      "go2rtc_auth_failed": "Сервер go2rtc требует авторизацию (HTTP 401). Введите логин/пароль, отключите авторизацию на сервере go2rtc, или снимите галочку «Использовать go2rtc» чтобы сохранить без подключения.",
+      "go2rtc_streams_api_failed": "go2rtc доступен, но не принимает /api/streams (проверьте настройки/права)",
+      "go2rtc_rtsp_port_closed": "HTTP API go2rtc доступен, но RTSP-порт (8554) закрыт. Проверьте firewall, bind-address, или что go2rtc собран с поддержкой RTSP.",
+      "unknown_status": "Неизвестный ответ получен. Пожалуйста, создайте issue.",
+      "unauthorized": "Ошибка авторизации",
+      "unknown": "Неожиданная ошибка",
+      "invalid_contract": "Выбранный договор больше не доступен. Начните заново и выберите ещё раз."
+    },
+    "step": {
+      "user": {
+        "data": {
+          "phone": "Номер телефона или договора"
+        },
+        "sections": {
+          "advanced": {
+            "name": "Для опытных",
+            "description": "Позволяет обойти вход по SMS, если токен доступа уже есть.",
+            "data": {
+              "access_token": "Токен доступа"
+            }
+          }
+        }
+      },
+      "contract": {
+        "data": {
+          "contract": "Договоры"
+        },
+        "description": "Выберите договор"
+      },
+      "sms": {
+        "data": {
+          "sms": "СМС"
+        },
+        "description": "Введите код из СМС"
+      },
+      "password": {
+        "data": {
+          "password": "Пароль"
+        },
+        "description": "Введите пароль для входа"
+      },
+      "go2rtc_menu": {
+        "menu_options": {
+          "go2rtc": "Настроить go2rtc (звук + стабильнее)",
+          "skip_go2rtc": "Пропустить"
+        }
+      },
+      "go2rtc": {
+        "title": "Настройка go2rtc",
+        "description": "Если включить go2rtc, видео будет открываться со звуком через RTSP. Внешняя публикация включается отдельно: отключённые сущности камер никогда не публикуются, а публикация скрытых камер работает только вместе с основной настройкой.",
+        "data": {
+          "use_go2rtc": "Использовать go2rtc",
+          "go2rtc_base_url": "go2rtc API URL",
+          "go2rtc_rtsp_host": "RTSP host",
+          "go2rtc_username": "Имя пользователя go2rtc",
+          "go2rtc_password": "Пароль go2rtc",
+          "go2rtc_keep_warm": "Публиковать включённые камеры для внешнего RTSP",
+          "go2rtc_keep_warm_hidden": "Также публиковать скрытые камеры"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Войти заново",
+        "description": "Оператор отверг сохранённый токен для {account}. Войдите заново — камеры, замки и настройки сохранятся.",
+        "data": {
+          "phone": "Номер телефона или договора"
+        },
+        "sections": {
+          "advanced": {
+            "name": "Для опытных",
+            "description": "Позволяет обойти вход по SMS, если токен доступа уже есть.",
+            "data": {
+              "access_token": "Токен доступа"
+            }
+          }
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Настройки go2rtc",
+        "description": "Если включить go2rtc — видео будет со звуком. Внешняя публикация включается отдельно: отключённые сущности камер никогда не публикуются, а публикация скрытых камер работает только вместе с основной настройкой.",
+        "data": {
+          "use_go2rtc": "Использовать go2rtc",
+          "go2rtc_base_url": "go2rtc API URL",
+          "go2rtc_username": "Имя пользователя go2rtc",
+          "go2rtc_password": "Пароль go2rtc",
+          "go2rtc_keep_warm": "Публиковать включённые камеры для внешнего RTSP",
+          "go2rtc_keep_warm_hidden": "Также публиковать скрытые камеры"
+        }
+      }
+    },
+    "error": {
+      "go2rtc_required_fields": "Заполните поле go2rtc API URL",
+      "go2rtc_invalid_url": "Некорректный URL (не удалось определить host)",
+      "go2rtc_unreachable": "Не удалось подключиться к go2rtc (проверьте URL или сеть)",
+      "go2rtc_auth_failed": "Сервер go2rtc требует авторизацию (HTTP 401). Введите логин/пароль, отключите авторизацию на сервере go2rtc, или снимите галочку «Использовать go2rtc» чтобы сохранить без подключения.",
+      "go2rtc_streams_api_failed": "go2rtc доступен, но не принимает /api/streams (проверьте настройки/права)",
+      "go2rtc_rtsp_port_closed": "HTTP API go2rtc доступен, но RTSP-порт (8554) закрыт. Проверьте firewall, bind-address, или что go2rtc собран с поддержкой RTSP."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "balance": {
+        "name": "Баланс аккаунта",
+        "state_attributes": {
+          "amount_sum": {
+            "name": "Сумма к оплате"
+          },
+          "target_date": {
+            "name": "Дата платежа"
+          },
+          "payment_link": {
+            "name": "Ссылка на оплату"
+          },
+          "blocked": {
+            "name": "Аккаунт заблокирован"
+          }
+        }
+      },
+      "days_to_block": {
+        "name": "Дней до блокировки"
+      },
+      "go2rtc_rtsp_urls": {
+        "name": "Опубликованные RTSP-потоки"
+      },
+      "call_state": {
+        "name": "Состояние вызова",
+        "state": {
+          "idle": "Нет вызова",
+          "ringing": "Входящий вызов",
+          "connecting": "Соединение",
+          "active": "Разговор",
+          "ended": "Завершён",
+          "error": "Ошибка"
+        }
+      }
+    },
+    "binary_sensor": {
+      "blocked": {
+        "name": "Аккаунт заблокирован"
+      }
+    },
+    "event": {
+      "doorbell": {
+        "name": "Вызов домофона",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "ring": "Звонок",
+              "ended": "Завершён"
+            }
+          }
+        }
+      },
+      "access_history": {
+        "name": "История вызовов домофона",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "call_accepted": "Вызов принят",
+              "call_missed": "Вызов пропущен"
+            }
+          }
+        }
+      },
+      "account_history": {
+        "name": "История событий",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "call_accepted": "Вызов принят",
+              "call_missed": "Вызов пропущен"
+            }
+          }
+        }
+      },
+      "camera_history": {
+        "name": "История движения",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "motion": "Движение"
+            }
+          }
+        }
+      }
+    },
+    "lock": {
+      "lock": {
+        "name": "Замок",
+        "state_attributes": {
+          "place_id": {
+            "name": "Идентификатор адреса"
+          },
+          "access_control_id": {
+            "name": "Идентификатор домофона"
+          },
+          "entrance_id": {
+            "name": "Идентификатор подъезда"
+          },
+          "name": {
+            "name": "Название у оператора"
+          },
+          "openable": {
+            "name": "Можно открыть"
+          }
+        }
+      }
+    },
+    "switch": {
+      "dnd_root": {
+        "name": "Не беспокоить"
+      },
+      "dnd_intercom_calls": {
+        "name": "Без звонков с домофона"
+      },
+      "dnd_management_company_calls": {
+        "name": "Без уведомлений от УК"
+      }
+    }
+  },
+  "services": {
+    "answer": {
+      "name": "Ответить на вызов домофона",
+      "description": "Принять текущий входящий вызов домофона и начать двусторонний разговор."
+    },
+    "hangup": {
+      "name": "Завершить вызов домофона",
+      "description": "Завершить активный разговор по домофону."
+    },
+    "get_inventory": {
+      "name": "Адреса и идентификаторы устройств",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        }
+      }
+    },
+    "list_temp_passes": {
+      "name": "Список временных пропусков",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "temp_pass_options": {
+      "name": "Доступные двери для пропуска",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "temp_pass_lifetimes": {
+      "name": "Допустимые сроки действия пропуска",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "create_temp_pass": {
+      "name": "Создать временный пропуск",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора. Возвращает пропуск и текст ссылки в result; никаких сообщений гостю не отправляет.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "ttl": {
+          "name": "Срок действия",
+          "description": "Передайте одно из значений temp_pass_lifetimes без преобразования единиц."
+        },
+        "access_control_ids": {
+          "name": "Домофоны (ID)",
+          "description": "Список из temp_pass_options: например [101, 102]."
+        }
+      }
+    },
+    "delete_temp_pass": {
+      "name": "Удалить временный пропуск",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "pass_id": {
+          "name": "Пропуск (ID)",
+          "description": "Получите через list_temp_passes."
+        }
+      }
+    },
+    "list_access_keys": {
+      "name": "Список электронных ключей",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "add_access_key": {
+      "name": "Добавить электронный ключ",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "key_code": {
+          "name": "Код ключа",
+          "description": "Код вашего физического ключа. Не публикуйте трассировку автоматизации с этим полем."
+        }
+      }
+    },
+    "delete_access_key": {
+      "name": "Удалить электронный ключ",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "key_id": {
+          "name": "Услуга ключа (ID)",
+          "description": "Поле id из list_access_keys, не вложенный accessKey.id."
+        },
+        "key_code": {
+          "name": "Код ключа",
+          "description": "Код вашего физического ключа. Не публикуйте трассировку автоматизации с этим полем."
+        }
+      }
+    },
+    "reactivate_access_key": {
+      "name": "Повторно активировать ключ",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "key_id": {
+          "name": "Услуга ключа (ID)",
+          "description": "Поле id из list_access_keys, не вложенный accessKey.id."
+        },
+        "key_code": {
+          "name": "Код ключа",
+          "description": "Код вашего физического ключа. Не публикуйте трассировку автоматизации с этим полем."
+        }
+      }
+    },
+    "rename_access_key": {
+      "name": "Переименовать ключ",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "key_id": {
+          "name": "Услуга ключа (ID)",
+          "description": "Поле id из list_access_keys, не вложенный accessKey.id."
+        },
+        "name": {
+          "name": "Название",
+          "description": "Новое название в облаке оператора."
+        }
+      }
+    },
+    "toggle_key_notifications": {
+      "name": "Переключить уведомления ключа",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора. Переключает текущее значение; повторный вызов переключит его обратно.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "key_id": {
+          "name": "Услуга ключа (ID)",
+          "description": "Поле id из list_access_keys, не вложенный accessKey.id."
+        }
+      }
+    },
+    "camera_motion_parameters": {
+      "name": "Параметры обнаружения движения",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        }
+      }
+    },
+    "camera_set_sensitivity": {
+      "name": "Установить чувствительность движения",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "sensitivity": {
+          "name": "Чувствительность",
+          "description": "Допустимый диапазон проверяется по camera_motion_parameters."
+        }
+      }
+    },
+    "camera_set_recording": {
+      "name": "Включить или выключить запись",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "mode": {
+          "name": "Запись",
+          "description": "on — запись включена, off — выключена."
+        }
+      }
+    },
+    "camera_set_event_recording": {
+      "name": "Запись по событиям",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "enabled": {
+          "name": "Включено",
+          "description": "Включить запись по событиям."
+        }
+      }
+    },
+    "camera_rename": {
+      "name": "Переименовать камеру",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "name": {
+          "name": "Название",
+          "description": "Новое название в облаке оператора."
+        }
+      }
+    },
+    "camera_mirror": {
+      "name": "Отразить изображение камеры",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "axis": {
+          "name": "Ось отражения",
+          "description": "vertical или horizontal. Это команда изменения, а не сохранённое состояние."
+        }
+      }
+    },
+    "camera_ptz": {
+      "name": "Повернуть или остановить камеру",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора. После start отправьте stop даже при ошибке автоматизации.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "direction": {
+          "name": "Направление",
+          "description": "Направление поворота камеры."
+        },
+        "movement": {
+          "name": "Действие",
+          "description": "После start обязательно отправьте stop; для автоматизаций задайте короткую задержку."
+        }
+      }
+    },
+    "camera_audio_volumes": {
+      "name": "Уровни и диапазоны громкости",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        }
+      }
+    },
+    "camera_set_microphone_volume": {
+      "name": "Громкость микрофона камеры",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "volume": {
+          "name": "Громкость",
+          "description": "Одно из значений диапазона camera_audio_volumes."
+        }
+      }
+    },
+    "camera_set_speaker_volume": {
+      "name": "Громкость динамика камеры",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "camera_id": {
+          "name": "Камера (внутренний ID)",
+          "description": "Используйте personal_cameras.camera_id из get_inventory, не externalCameraId."
+        },
+        "volume": {
+          "name": "Громкость",
+          "description": "Одно из значений диапазона camera_audio_volumes."
+        }
+      }
+    },
+    "camera_features": {
+      "name": "Возможности камер",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "get_finances": {
+      "name": "Финансовая информация",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "list_requests": {
+      "name": "Список обращений",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "page": {
+          "name": "Страница",
+          "description": "Нумерация с нуля."
+        }
+      }
+    },
+    "list_documents": {
+      "name": "Документы по адресу",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "get_screen_sections": {
+      "name": "Разделы приложения для адреса",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        }
+      }
+    },
+    "create_maintenance_request": {
+      "name": "Создать обращение в управляющую компанию",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора. Однократно отправляет текст и контактный номер оператору.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "phone": {
+          "name": "Телефон",
+          "description": "Контактный номер для обращения."
+        },
+        "full_name": {
+          "name": "Имя",
+          "description": "Имя отправителя для обращения."
+        },
+        "message": {
+          "name": "Текст обращения",
+          "description": "Сообщение для управляющей компании."
+        }
+      }
+    },
+    "acknowledge_document": {
+      "name": "Отметить документ прочитанным",
+      "description": "Действие администратора. Возможность должна поддерживаться устройством и тарифом оператора.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Учётная запись",
+          "description": "Выберите загруженную запись Умный Дом.ру."
+        },
+        "place_id": {
+          "name": "Адрес (ID)",
+          "description": "Получите через my_dom_ru.get_inventory."
+        },
+        "document_id": {
+          "name": "Документ (ID)",
+          "description": "Получите через list_documents для этого же адреса."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "cannot_lock": {
+      "message": "Домофон нельзя закрыть: защёлку отпускает само железо, и через несколько секунд она запирается сама."
+    },
+    "cannot_unlock": {
+      "message": "Домофон не открылся: оператор отклонил запрос или недоступен."
+    },
+    "no_active_call": {
+      "message": "Сейчас нет входящего вызова домофона — отвечать и завершать нечего."
+    },
+    "dnd_unavailable": {
+      "message": "Настройки режима «не беспокоить» ещё не загружены — попробуйте позже."
+    },
+    "dnd_rejected": {
+      "message": "Оператор не принял изменение режима «не беспокоить»."
+    },
+    "integration_not_loaded": {
+      "message": "Интеграция «Умный Дом.ру» сейчас не загружена."
+    }
+  }
+}

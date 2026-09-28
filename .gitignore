@@ -1,0 +1,41 @@
+# Local research material: upstream clones, decompiled app, tooling
+.research/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+coverage.xml
+htmlcov/
+
+# Node
+node_modules/
+frontend/demo/screenshots/
+
+# Build output
+dist/
+*.apk
+*.apkm
+
+# Secrets and local data
+*.env
+.env*
+.storage/
+secrets.yaml
+home-assistant.log*
+*.db*
+config/

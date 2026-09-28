@@ -1,0 +1,592 @@
+"""Core refresh and concurrency contract for CameraStreamManager."""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from custom_components.my_dom_ru.go2rtc import Go2RtcRequestError
+from custom_components.my_dom_ru.stream_manager import (
+    _monotonic as _stream_manager_monotonic,
+    RETRY_INITIAL_SECONDS,
+    RETRY_MAX_EXPONENT,
+    RETRY_MAX_SECONDS,
+    CameraStreamManager,
+)
+
+
+def _manager(
+    *,
+    stream_side_effect=None,
+    client: MagicMock | None = None,
+):
+    coordinator = MagicMock()
+    coordinator.data = {
+        "cameras": [
+            {"id": "100", "name": "Front door"},
+            {"id": "200", "name": "Lift"},
+        ]
+    }
+    if stream_side_effect is None:
+        coordinator.get_camera_stream = AsyncMock(
+            return_value="https://operator/100?token=TOKEN_1"
+        )
+    elif isinstance(stream_side_effect, BaseException):
+        coordinator.get_camera_stream = AsyncMock(side_effect=stream_side_effect)
+    else:
+        coordinator.get_camera_stream = AsyncMock(side_effect=stream_side_effect)
+
+    if client is None:
+        client = MagicMock()
+        client.async_patch_stream = AsyncMock()
+        client.async_enable_preload = AsyncMock()
+        client.rtsp_url = MagicMock(
+            side_effect=lambda name, *, include_credentials: (
+                f"rtsp://user:pass@go2rtc:8554/{name}"
+                if include_credentials
+                else f"rtsp://go2rtc:8554/{name}"
+            )
+        )
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={},
+        # Фоновые задачи привязаны к записи, а не к hass: так они снимаются
+        # при выгрузке и не держат startup-барьер.
+        async_create_background_task=MagicMock(
+            side_effect=lambda _hass, coro, **kwargs: asyncio.create_task(
+                coro, name=kwargs.get("name")
+            )
+        ),
+    )
+    hass = MagicMock()
+    hass.async_create_task.side_effect = (
+        lambda coro, **kwargs: asyncio.create_task(
+            coro,
+            name=kwargs.get("name"),
+        )
+    )
+    manager = CameraStreamManager(
+        hass=hass,
+        entry=entry,
+        coordinator=coordinator,
+        client=client,
+    )
+    manager.is_camera_publishable = MagicMock(return_value=True)
+    return manager, coordinator, client
+
+
+async def test_refresh_mints_and_patches_complete_source() -> None:
+    manager, coordinator, client = _manager()
+
+    result = await manager.async_refresh("100", "ha_open")
+
+    coordinator.get_camera_stream.assert_awaited_once_with("100")
+    client.async_patch_stream.assert_awaited_once_with(
+        "mdr_100",
+        "ffmpeg:https://operator/100?token=TOKEN_1"
+        "#video=copy#audio=aac#audio=opus",
+    )
+    client.rtsp_url.assert_called_once_with(
+        "mdr_100", include_credentials=True
+    )
+    assert result.url == "rtsp://user:pass@go2rtc:8554/mdr_100"
+    assert result.proxied is True
+
+    state = manager.camera_state("100")
+    assert state is not None
+    assert state.camera_id == "100"
+    assert state.stream_name == "mdr_100"
+    assert state.display_name == "Front door"
+    assert state.present is True
+    assert state.status == "ready"
+    assert state.last_success is not None
+    assert state.last_success_monotonic is not None
+    assert state.preloaded is False
+    assert state.producer_active is False
+    assert "TOKEN_1" not in repr(state)
+
+
+async def test_eligible_refresh_patches_then_enables_preload() -> None:
+    manager, coordinator, client = _manager()
+    events: list[str] = []
+    manager.keep_warm = True
+    manager.is_camera_eligible = MagicMock(return_value=True)
+    coordinator.get_camera_stream.side_effect = lambda camera_id: (
+        events.append("mint")
+        or f"https://operator/{camera_id}?token=FRESH"
+    )
+    client.async_patch_stream.side_effect = (
+        lambda *_args: events.append("patch")
+    )
+    client.async_enable_preload.side_effect = (
+        lambda *_args: events.append("preload")
+    )
+
+    result = await manager.async_refresh("100", "background")
+
+    assert events == ["mint", "patch", "preload"]
+    assert result.proxied is True
+    client.async_enable_preload.assert_awaited_once_with("mdr_100")
+    state = manager.camera_state("100")
+    assert state is not None
+    assert state.eligible is True
+    assert state.present is True
+    assert state.preloaded is True
+    assert state.producer_active is True
+    assert state.status == "ready"
+
+
+async def test_active_preload_refreshes_source_without_rearming() -> None:
+    manager, coordinator, client = _manager()
+    manager.keep_warm = True
+    manager.is_camera_eligible = MagicMock(return_value=True)
+    state = manager._state_for("100")
+    state.preloaded = True
+    state.producer_active = True
+
+    result = await manager.async_refresh("100", "background_due")
+
+    assert result.proxied is True
+    coordinator.get_camera_stream.assert_awaited_once_with("100")
+    client.async_patch_stream.assert_awaited_once()
+    client.async_enable_preload.assert_not_awaited()
+    assert manager.camera_state("100").preloaded is True
+    assert manager.camera_state("100").producer_active is True
+
+
+async def test_preload_failure_retries_with_a_new_operator_url() -> None:
+    manager, coordinator, client = _manager(
+        stream_side_effect=[
+            "https://operator/100?token=FIRST",
+            "https://operator/100?token=SECOND",
+        ]
+    )
+    manager.keep_warm = True
+    manager._started = True
+    manager.is_camera_eligible = MagicMock(return_value=True)
+    manager._schedule_due = MagicMock()
+    client.async_enable_preload.side_effect = [
+        Go2RtcRequestError("preload_enable", "http_500"),
+        None,
+    ]
+
+    first = await manager.async_refresh("100", "background")
+    second = await manager.async_refresh("100", "retry")
+
+    assert first.url == "https://operator/100?token=FIRST"
+    assert first.proxied is False
+    assert second.proxied is True
+    assert coordinator.get_camera_stream.await_count == 2
+    assert client.async_patch_stream.await_count == 2
+    assert client.async_enable_preload.await_count == 2
+    assert "FIRST" in client.async_patch_stream.await_args_list[0].args[1]
+    assert "SECOND" in client.async_patch_stream.await_args_list[1].args[1]
+    manager._schedule_due.assert_any_call("100", 15.0)
+    state = manager.camera_state("100")
+    assert state is not None
+    assert state.failure_count == 0
+    assert state.preloaded is True
+    assert state.producer_active is True
+
+
+async def test_refresh_notifies_sanitized_state_subscribers() -> None:
+    manager, _, _ = _manager()
+    snapshots = []
+
+    unsubscribe = manager.async_subscribe(
+        lambda: snapshots.append(manager.camera_states())
+    )
+    await manager.async_refresh("100", "ha_open")
+
+    assert len(snapshots) == 1
+    assert snapshots[0][0].status == "ready"
+    assert "TOKEN_1" not in repr(snapshots)
+
+    unsubscribe()
+    await manager.async_refresh("100", "ha_open")
+    assert len(snapshots) == 1
+
+
+async def test_concurrent_reasons_share_one_operator_request_and_patch() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_stream(camera_id: str) -> str:
+        started.set()
+        await release.wait()
+        return f"https://operator/{camera_id}?token=SHARED"
+
+    manager, coordinator, client = _manager(stream_side_effect=delayed_stream)
+
+    calls = [
+        asyncio.create_task(manager.async_refresh("100", "background")),
+        asyncio.create_task(manager.async_refresh("100", "ha_open")),
+        asyncio.create_task(manager.async_refresh("100", "recovery")),
+    ]
+    await started.wait()
+    release.set()
+    results = await asyncio.gather(*calls)
+
+    assert coordinator.get_camera_stream.await_count == 1
+    assert client.async_patch_stream.await_count == 1
+    assert results[0] == results[1] == results[2]
+
+
+async def test_concurrent_eligible_reasons_share_one_preload_activation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_stream(camera_id: str) -> str:
+        started.set()
+        await release.wait()
+        return f"https://operator/{camera_id}?token=SHARED"
+
+    manager, coordinator, client = _manager(stream_side_effect=delayed_stream)
+    manager.keep_warm = True
+    manager.is_camera_eligible = MagicMock(return_value=True)
+    calls = [
+        asyncio.create_task(manager.async_refresh("100", "background")),
+        asyncio.create_task(manager.async_refresh("100", "ha_open")),
+        asyncio.create_task(manager.async_refresh("100", "recovery")),
+    ]
+    await started.wait()
+    release.set()
+
+    results = await asyncio.gather(*calls)
+
+    assert coordinator.get_camera_stream.await_count == 1
+    assert client.async_patch_stream.await_count == 1
+    assert client.async_enable_preload.await_count == 1
+    assert results[0] == results[1] == results[2]
+
+
+async def test_sequential_refreshes_mint_separate_operator_urls() -> None:
+    """Операторская ссылка одноразовая: каждый реальный refresh минтит свою."""
+    from custom_components.my_dom_ru import stream_manager as sm
+
+    manager, coordinator, client = _manager(
+        stream_side_effect=[
+            "https://operator/100?token=FIRST",
+            "https://operator/100?token=SECOND",
+        ]
+    )
+
+    clock = [1000.0]
+    with patch.object(sm, "_monotonic", lambda: clock[0]):
+        first = await manager.async_refresh("100", "ha_open")
+        clock[0] += sm.HA_OPEN_REUSE_SECONDS + 1
+        second = await manager.async_refresh("100", "ha_open")
+
+    assert first.proxied is True
+    assert second.proxied is True
+    assert coordinator.get_camera_stream.await_count == 2
+    assert client.async_patch_stream.await_count == 2
+    patched_sources = [
+        call.args[1] for call in client.async_patch_stream.await_args_list
+    ]
+    assert "FIRST" in patched_sources[0]
+    assert "SECOND" in patched_sources[1]
+
+
+async def test_second_ha_open_reuses_the_live_stream() -> None:
+    """HA спрашивает источник дважды на камеру — второй минт избыточен.
+
+    Наружу отдаётся стабильный go2rtc URL, а поток уже настроен свежим
+    источником, поэтому повторный поход к оператору ничего не меняет.
+    """
+    from custom_components.my_dom_ru import stream_manager as sm
+
+    manager, coordinator, client = _manager()
+
+    clock = [1000.0]
+    with patch.object(sm, "_monotonic", lambda: clock[0]):
+        first = await manager.async_refresh("100", "ha_open")
+        clock[0] += 2.0  # HA возвращается через пару секунд
+        second = await manager.async_refresh("100", "ha_open")
+
+    assert first.proxied is True
+    assert second.proxied is True
+    assert second.url == first.url
+    assert coordinator.get_camera_stream.await_count == 1
+    assert client.async_patch_stream.await_count == 1
+
+
+@pytest.mark.parametrize("reason", ["recovery", "active_consumer"])
+async def test_recovery_always_mints_even_within_the_reuse_window(
+    reason: str,
+) -> None:
+    """Переиспользование только для ha_open: recovery обязан взять свежий URL."""
+    from custom_components.my_dom_ru import stream_manager as sm
+
+    manager, coordinator, _ = _manager()
+
+    clock = [1000.0]
+    with patch.object(sm, "_monotonic", lambda: clock[0]):
+        await manager.async_refresh("100", "ha_open")
+        clock[0] += 1.0
+        await manager.async_refresh("100", reason)
+
+    assert coordinator.get_camera_stream.await_count == 2
+
+
+async def test_empty_operator_url_records_failure_without_patch() -> None:
+    manager, _, client = _manager(stream_side_effect=[None])
+
+    result = await manager.async_refresh("100", "background")
+
+    assert result.url is None
+    assert result.proxied is False
+    client.async_patch_stream.assert_not_awaited()
+    state = manager.camera_state("100")
+    assert state is not None
+    assert state.present is False
+    assert state.failure_count == 1
+    assert state.status == "empty_source"
+
+
+async def test_patch_failure_returns_direct_fallback_for_ha_open() -> None:
+    direct_url = "https://operator/100?token=FALLBACK_SECRET"
+    client = MagicMock()
+    client.async_patch_stream = AsyncMock(
+        side_effect=Go2RtcRequestError("patch", "http_500")
+    )
+    client.rtsp_url = MagicMock()
+    manager, _, _ = _manager(
+        stream_side_effect=[direct_url],
+        client=client,
+    )
+
+    result = await manager.async_refresh("100", "ha_open")
+
+    assert result.url == direct_url
+    assert result.proxied is False
+    client.rtsp_url.assert_not_called()
+    state = manager.camera_state("100")
+    assert state is not None
+    assert state.status == "patch_http_500"
+    assert state.failure_count == 1
+    assert "FALLBACK_SECRET" not in repr(state)
+
+
+async def test_cancelled_waiter_does_not_cancel_shared_refresh() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_stream(camera_id: str) -> str:
+        started.set()
+        await release.wait()
+        return f"https://operator/{camera_id}?token=SURVIVES"
+
+    manager, coordinator, client = _manager(stream_side_effect=delayed_stream)
+    cancelled_waiter = asyncio.create_task(
+        manager.async_refresh("100", "background")
+    )
+    await started.wait()
+    surviving_waiter = asyncio.create_task(
+        manager.async_refresh("100", "ha_open")
+    )
+
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    release.set()
+    result = await asyncio.wait_for(surviving_waiter, timeout=1)
+
+    assert result.proxied is True
+    assert coordinator.get_camera_stream.await_count == 1
+    assert client.async_patch_stream.await_count == 1
+
+
+async def test_different_cameras_refresh_independently() -> None:
+    release = {"100": asyncio.Event(), "200": asyncio.Event()}
+
+    async def delayed_stream(camera_id: str) -> str:
+        await release[camera_id].wait()
+        return f"https://operator/{camera_id}?token={camera_id}"
+
+    manager, coordinator, client = _manager(stream_side_effect=delayed_stream)
+    first = asyncio.create_task(manager.async_refresh("100", "background"))
+    second = asyncio.create_task(manager.async_refresh("200", "background"))
+    await asyncio.sleep(0)
+
+    release["200"].set()
+    result_200 = await asyncio.wait_for(second, timeout=1)
+    assert result_200.url.endswith("/mdr_200")
+    assert not first.done()
+
+    release["100"].set()
+    result_100 = await asyncio.wait_for(first, timeout=1)
+    assert result_100.url.endswith("/mdr_100")
+    assert coordinator.get_camera_stream.await_count == 2
+    assert client.async_patch_stream.await_count == 2
+
+
+async def test_operator_error_is_recorded_without_exception_details() -> None:
+    manager, _, client = _manager(
+        stream_side_effect=RuntimeError(
+            "https://operator/source?token=OPERATOR_SECRET"
+        )
+    )
+
+    result = await manager.async_refresh("100", "background")
+
+    assert result.url is None
+    assert result.proxied is False
+    client.async_patch_stream.assert_not_awaited()
+    state = manager.camera_state("100")
+    assert state is not None
+    assert state.status == "operator_error"
+    assert "OPERATOR_SECRET" not in repr(state)
+
+
+async def test_ha_open_does_not_wait_for_preload() -> None:
+    """Прогрев не оплачивается временем старта.
+
+    go2rtc отвечает на PUT /api/preload только когда поднимет поток (2-6 с на
+    камеру по замеру на проде). Раньше HA ждал этот ответ внутри
+    stream_source и не мог добавить следующую камеру.
+    """
+    manager, _, client = _manager()
+    manager.is_camera_eligible = MagicMock(return_value=True)
+
+    gate = asyncio.Event()
+
+    async def _slow_preload(_name):
+        await gate.wait()
+
+    client.async_enable_preload = AsyncMock(side_effect=_slow_preload)
+
+    # Таймаут — часть проверки: если preload снова станет блокирующим,
+    # тест упадёт здесь, а не подвесит прогон.
+    result = await asyncio.wait_for(
+        manager.async_refresh("100", "ha_open"), timeout=5
+    )
+
+    # refresh вернулся, пока go2rtc ещё поднимает поток
+    assert result.proxied is True
+    assert not gate.is_set()
+
+    gate.set()
+    await asyncio.gather(*manager._preload_tasks.values())
+    client.async_enable_preload.assert_awaited_once()
+
+
+async def test_background_refresh_still_waits_for_preload() -> None:
+    """Фоновому циклу спешить некуда — там прогрев остаётся синхронным."""
+    manager, _, client = _manager()
+    manager.is_camera_eligible = MagicMock(return_value=True)
+
+    await manager.async_refresh("100", "background_due")
+
+    client.async_enable_preload.assert_awaited_once()
+    assert not manager._preload_tasks
+    state = manager.camera_state("100")
+    assert state is not None
+    assert state.preloaded is True
+
+
+async def test_stop_cancels_pending_preload_before_cleanup() -> None:
+    """Поздний PUT не должен пережить выгрузку entry."""
+    manager, _, client = _manager()
+    manager.is_camera_eligible = MagicMock(return_value=True)
+
+    gate = asyncio.Event()
+
+    async def _slow_preload(_name):
+        await gate.wait()
+
+    client.async_enable_preload = AsyncMock(side_effect=_slow_preload)
+    await manager.async_refresh("100", "ha_open")
+    assert manager._preload_tasks
+
+    pending = list(manager._preload_tasks.values())
+    await manager.async_stop()
+
+    assert not manager._preload_tasks
+    assert all(task.cancelled() or task.done() for task in pending)
+    # Гейт так и не открыт: PUT был отменён, а не дождался go2rtc.
+    assert not gate.is_set()
+
+async def test_retry_delay_survives_long_operator_outage() -> None:
+    """Затяжной отказ оператора не роняет расчёт задержки.
+
+    Потолок `min()` стоял после возведения в степень, поэтому сначала
+    вычислялось `2 ** failure_count` целиком. На проде оператор отдавал 500
+    несколько суток подряд, счётчик перевалил за тысячу — и `_record_failure`
+    падал с `OverflowError`, унося с собой `stream_source()`: камеры
+    переставали открываться вообще.
+    """
+    manager, _, _ = _manager()
+    manager._started = True
+    manager.keep_warm = True
+    manager._schedule_due = MagicMock()
+    state = manager._state_for("100")
+
+    for failure_count in (0, 1, 5, 1023, 4095, 100_000):
+        state.failure_count = failure_count
+        manager._record_failure(state, "empty_source")
+
+    # Прогрессию берём из того, что планировщик реально получил, а не
+    # пересчитываем формулу в тесте: иначе проверка сравнивала бы её с самой
+    # собой и молчала бы даже при полностью снятом backoff.
+    manager._schedule_due.reset_mock()
+    for failure_count in (0, 1, 2, 9, 9_999):
+        state.failure_count = failure_count
+        manager._record_failure(state, "empty_source")
+
+    scheduled = [call.args[1] for call in manager._schedule_due.call_args_list]
+
+    assert scheduled == [15.0, 30.0, 60.0, 300.0, 300.0]
+
+
+async def test_ha_open_does_not_reuse_after_failure() -> None:
+    """Окно переиспользования не действует, если последняя попытка провалилась.
+
+    `last_success_monotonic` остаётся от прошлого успеха, поэтому в течение
+    десяти секунд после неудачи он всё ещё выглядит свежим. Без проверки
+    статуса HA получал бы ссылку на поток, который go2rtc уже не обслуживает.
+    """
+    manager, coordinator, _ = _manager()
+    manager._started = True
+    state = manager._state_for("100")
+    state.present = True
+    state.status = "ready"
+    state.last_success_monotonic = _stream_manager_monotonic()
+
+    # Успешное окно: к оператору не идём.
+    first = await manager.async_refresh("100", "ha_open")
+    assert first.proxied is True
+    assert coordinator.get_camera_stream.await_count == 0
+
+    # Та же свежесть, но последняя попытка неудачна — окно не применяется.
+    state.status = "empty_source"
+    second = await manager.async_refresh("100", "ha_open")
+
+    assert coordinator.get_camera_stream.await_count == 1, (
+        "после неудачи источник обязан запрашиваться заново"
+    )
+    assert second.proxied is True
+
+
+async def test_preload_task_is_owned_by_config_entry() -> None:
+    """Прогрев запускается задачей записи, а не голой задачей hass.
+
+    Разница не косметическая: задача записи снимается при её выгрузке и не
+    удерживает startup-барьер HA, пока go2rtc поднимает поток.
+    """
+    manager, _, _ = _manager()
+    manager._started = True
+    state = manager._state_for("100")
+
+    manager._schedule_preload(state)
+    await asyncio.gather(*manager._preload_tasks.values(), return_exceptions=True)
+
+    manager.entry.async_create_background_task.assert_called_once()
+    assert (
+        manager.entry.async_create_background_task.call_args.args[0] is manager.hass
+    )

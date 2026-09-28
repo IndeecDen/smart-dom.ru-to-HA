@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Установка и первые шаги
+    url: https://github.com/IndeecDen/smart-dom.ru-to-HA/blob/main/docs/INSTALL.md
+    about: HACS, ручная установка, карточки, первый запуск.
+  - name: Что реализовано и что требует проверки
+    url: https://github.com/IndeecDen/smart-dom.ru-to-HA/blob/main/docs/FEATURES.md
+    about: Уровень подтверждения каждой функции приложения.
+  - name: Обсуждение
+    url: https://github.com/IndeecDen/smart-dom.ru-to-HA/discussions
+    about: Вопросы по настройке без отчёта об ошибке.

@@ -1,0 +1,22 @@
+{
+  "domain": "my_dom_ru",
+  "name": "Умный Дом.ру",
+  "after_dependencies": [
+    "media_source"
+  ],
+  "codeowners": [
+    "@IndeecDen"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http"
+  ],
+  "documentation": "https://github.com/IndeecDen/smart-dom.ru-to-HA",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "requirements": [
+    "firebase-messaging==0.4.5",
+    "audioop-lts>=0.2.1;python_version>='3.13'"
+  ],
+  "version": "0.1.0"
+}
