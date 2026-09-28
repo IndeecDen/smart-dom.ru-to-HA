@@ -122,7 +122,8 @@
           "go2rtc_username": "Имя пользователя go2rtc",
           "go2rtc_password": "Пароль go2rtc",
           "go2rtc_keep_warm": "Публиковать включённые камеры для внешнего RTSP",
-          "go2rtc_keep_warm_hidden": "Также публиковать скрытые камеры"
+          "go2rtc_keep_warm_hidden": "Также публиковать скрытые камеры",
+          "key_names": "Имена ключей (по одному КОД = Имя в строке)"
         }
       }
     },
@@ -190,14 +191,16 @@
         }
       },
       "access_history": {
-        "name": "История вызовов домофона",
+        "name": "История доступа",
         "state_attributes": {
           "event_type": {
             "state": {
               "call_accepted": "Вызов принят",
-              "call_missed": "Вызов пропущен"
+              "call_missed": "Вызов пропущен",
+              "key_activated": "Открыт электронным ключом"
             }
-          }
+          },
+          "key_name": "Кто"
         }
       },
       "account_history": {
@@ -206,7 +209,8 @@
           "event_type": {
             "state": {
               "call_accepted": "Вызов принят",
-              "call_missed": "Вызов пропущен"
+              "call_missed": "Вызов пропущен",
+              "key_activated": "Открыт электронным ключом"
             }
           }
         }

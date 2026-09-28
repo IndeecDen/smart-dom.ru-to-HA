@@ -19,6 +19,7 @@ polling-данные (камеры, замки, баланс, история) п
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
@@ -31,18 +32,84 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
+from .access_keys import parse_key_names, resolve_key_name
 from .api import MyDomRuAPI
 from .const import (
     CONF_FCM_CREDENTIALS,
+    CONF_KEY_NAMES,
     DOMAIN,
+    EVENT_KEY_ACTIVATED,
     FCM_API_KEY,
     FCM_APP_ID,
     FCM_BUNDLE_ID,
     FCM_PROJECT_ID,
     FCM_SENDER_ID,
     LOGGER,
+    SIGNAL_ACCESS_KEY,
     SIGNAL_DOORBELL,
 )
+
+def parse_place_event(raw: str) -> dict[str, Any] | None:
+    """Parse one `placeEvent` push body into a flat, sanitized dict.
+
+    Kept free of Home Assistant imports so it can be unit tested directly.
+
+    Args:
+        raw: The JSON string carried under the `u` bundle key.
+
+    Returns:
+        A dict with `event_type`, `event_id`, `timestamp`, `message`,
+        `place_id`, `source_type` and `source_id`, or None when the payload is
+        not a well formed `placeEvent` carrying the fields we need.
+
+    Note:
+        `timestamp` arrives as a JSON *string* in the push (the app's Moshi
+        model types it as String) but as a JSON *number* in the REST history
+        response. Both are accepted and normalized to int.
+    """
+    try:
+        envelope = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    event = envelope.get("event")
+    if not isinstance(event, dict) or event.get("type") != _PLACE_EVENT_TYPE:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+
+    event_type = payload.get("eventTypeName")
+    event_id = payload.get("id")
+    place_id = payload.get("placeId")
+    source = payload.get("source")
+    if not isinstance(event_type, str) or not isinstance(event_id, str | int):
+        return None
+    if not isinstance(place_id, int):
+        return None
+    if not isinstance(source, dict):
+        return None
+    source_type = source.get("type")
+    source_id = source.get("id")
+    if not isinstance(source_type, str) or not isinstance(source_id, int):
+        return None
+
+    try:
+        timestamp = int(payload.get("timestamp"))
+    except (TypeError, ValueError):
+        return None
+    message = payload.get("message")
+    return {
+        "event_type": event_type,
+        "event_id": str(event_id),
+        "timestamp": timestamp,
+        "message": message if isinstance(message, str) else "",
+        "place_id": str(place_id),
+        "source_type": source_type,
+        "source_id": str(source_id),
+    }
+
 
 # PushType (FCM) → event_type сущности. Таксономия `ended`/`reason` — в
 # docs/architecture/api-reference.md (раздел «Вызов домофона»).
@@ -50,6 +117,19 @@ _PUSH_TYPE_EVENT = {
     "CALL_INCOMING": "ring",
     "CALL_END_ANSWERED_MOBILE": "ended",
 }
+
+#: Bundle key holding a `placeEvent` push, as used by the Android app. Unlike
+#: the call channel (flat `PushType` keys), every non-call event arrives as a
+#: JSON blob under this key:
+#: ``{"event": {"payload": {...}, "type": "placeEvent"}}``.
+#:
+#: Only `accessKeyActivated` is acted on. The other event types the app
+#: renders (cameraMoving, billingNotification, emergencyNotification, …) are
+#: either covered by the REST poll or deliberately not wired up here — an
+#: emergency push in particular should not be swallowed by a home automation.
+_EVENT_PUSH_KEY = "u"
+_PLACE_EVENT_TYPE = "placeEvent"
+_PUSH_ACCESS_KEY_EVENT = "accessKeyActivated"
 
 # Предохранитель самой firebase-messaging: после N подряд ошибок соединения
 # библиотека сама останавливает receiver (`_terminate()` → run_state STOPPING).
@@ -445,10 +525,12 @@ class DoorbellFcmListener:
 
     @callback
     def _on_notification(self, notification: dict, persistent_id: str, *_: Any) -> None:
-        """Callback firebase-messaging: парсит push → SIGNAL_DOORBELL."""
+        """Callback firebase-messaging: парсит push → SIGNAL_DOORBELL / SIGNAL_ACCESS_KEY."""
         if self._stopping:
             return
         data = (notification or {}).get("data") or {}
+        if self._async_handle_place_event(data):
+            return
         push_type = data.get("PushType") or data.get("google.c.a.m_l")
         event_type = _PUSH_TYPE_EVENT.get(str(push_type)) if push_type else None
         if not event_type:
@@ -476,3 +558,38 @@ class DoorbellFcmListener:
                 "attributes": attributes,
             },
         )
+
+    def _async_handle_place_event(self, data: dict[str, Any]) -> bool:
+        """Dispatch an `accessKeyActivated` push, if this is one.
+
+        Returns:
+            True when the push was a `placeEvent` and was consumed here, so the
+            caller does not also try the call-channel mapping.
+        """
+        raw = data.get(_EVENT_PUSH_KEY)
+        if not isinstance(raw, str) or not raw:
+            return False
+        event = parse_place_event(raw)
+        if event is None:
+            # `u` present but unparseable: log the type, never the body — the
+            # body is operator text and may embed a key code.
+            LOGGER.debug("FCM: placeEvent не разобран (%s) — пропуск", type(raw).__name__)
+            return True
+        if event["event_type"] != _PUSH_ACCESS_KEY_EVENT:
+            return True
+        payload: dict[str, Any] = {
+            "event_type": EVENT_KEY_ACTIVATED,
+            "event_id": event["event_id"],
+            "occurred_at": event["timestamp"],
+            "place_id": event["place_id"],
+            "source_type": event["source_type"],
+            "source_id": event["source_id"],
+        }
+        key_name = resolve_key_name(
+            event["message"],
+            parse_key_names((self._entry.options or {}).get(CONF_KEY_NAMES)),
+        )
+        if key_name:
+            payload["key_name"] = key_name
+        async_dispatcher_send(self._hass, SIGNAL_ACCESS_KEY, payload)
+        return True

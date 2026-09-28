@@ -96,6 +96,21 @@ CALL_STATE_ERROR: Final = "error"
 # был стабилен между рестартами (как access_token/refresh_token).
 CONF_FCM_CREDENTIALS: Final = "fcm_credentials"
 
+# User-supplied access-key labels (options). The backend never says which key
+# opened a door, so the code → "Сын"/"Жена" mapping is kept locally. See
+# `access_keys.py` for why the message is matched by containment, not parsed.
+CONF_KEY_NAMES: Final = "key_names"
+
+# Realtime access-key activations delivered as a `placeEvent` FCM push. Fired
+# from fcm.py (sender) → event.py (listener). The durable REST poll
+# (`history.py`) covers the gap when HA was down; both paths converge on the
+# same `event.my_dom_ru_*_access_*` entity.
+SIGNAL_ACCESS_KEY: Final = f"{DOMAIN}_access_key"
+
+# HA event type for "an access key opened the door". Distinct from the
+# call_accepted / call_missed pair, which describe a video call, not a key.
+EVENT_KEY_ACTIVATED: Final = "key_activated"
+
 # Firebase/FCM конфиг приложения «Мой Дом / NTK» (project myhome-3b9cc).
 # Публичные идентификаторы из APK (как BASE_API_URL) — НЕ секреты: Firebase
 # API key дизайнерски публичен (защита — package+SHA1 restriction). Нужны для

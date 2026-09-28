@@ -13,12 +13,14 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
-from .const import DOMAIN, LOGGER
+from .const import CONF_KEY_NAMES, DOMAIN, EVENT_KEY_ACTIVATED, LOGGER
+from .access_keys import parse_key_names, resolve_key_name
 
 
 _GENERAL_EVENT_TYPES = {
     "accessControlCallAccepted": "call_accepted",
     "accessControlCallMissed": "call_missed",
+    "accessKeyActivated": EVENT_KEY_ACTIVATED,
 }
 _CAMERA_MOTION_EVENT_SUBJECT_ID = 126
 _CAMERA_LOOKBACK = timedelta(days=1)
@@ -27,6 +29,11 @@ _MAX_STORED_IDS = 200
 
 HISTORY_POLL_INTERVAL = timedelta(minutes=5)
 SIGNAL_HISTORY_EVENT = f"{DOMAIN}_history_event"
+
+
+def _no_key_names() -> Mapping[str, str]:
+    """Default when an entry has no access-key labels configured."""
+    return {}
 
 
 def history_signal(entry_id: str) -> str:
@@ -126,11 +133,13 @@ class HistoryPoller:
         emit: Callable[[dict[str, Any]], None],
         *,
         camera_enabled: Callable[[str], bool] | None = None,
+        key_names: Callable[[], Mapping[str, str]] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._watermark = watermark
         self._emit = emit
         self._camera_enabled = camera_enabled or (lambda _camera_id: False)
+        self._key_names = key_names or _no_key_names
 
     async def async_poll(self) -> bool:
         """Poll page zero and emit unseen whitelisted events chronologically."""
@@ -170,16 +179,23 @@ class HistoryPoller:
                         or mapped_type is None
                     ):
                         continue
-                    self._emit(
-                        {
-                            "event_type": mapped_type,
-                            "event_id": event.id,
-                            "occurred_at": event.timestamp,
-                            "place_id": event.place_id,
-                            "source_type": event.source_type,
-                            "source_id": event.source_id,
-                        }
-                    )
+                    payload: dict[str, Any] = {
+                        "event_type": mapped_type,
+                        "event_id": event.id,
+                        "occurred_at": event.timestamp,
+                        "place_id": event.place_id,
+                        "source_type": event.source_type,
+                        "source_id": event.source_id,
+                    }
+                    if mapped_type == EVENT_KEY_ACTIVATED:
+                        # The message is read here and dropped: only the label
+                        # it resolves to leaves this module.
+                        key_name = resolve_key_name(
+                            event.message, self._key_names()
+                        )
+                        if key_name:
+                            payload["key_name"] = key_name
+                    self._emit(payload)
 
         upper = datetime.now(UTC).replace(microsecond=0)
         lower = upper - _CAMERA_LOOKBACK
@@ -274,6 +290,7 @@ class HistoryManager:
                 payload,
             ),
             camera_enabled=self._camera_enabled,
+            key_names=self._key_names,
         )
         await self.async_poll()
         self._unsub_interval = async_track_time_interval(
@@ -281,6 +298,17 @@ class HistoryManager:
             self._async_interval,
             HISTORY_POLL_INTERVAL,
         )
+
+    @callback
+    def _key_names(self) -> Mapping[str, str]:
+        """Return the entry's configured code → label mapping.
+
+        Read from the coordinator's options snapshot on every poll rather than
+        captured once, so a label edit takes effect without a restart of the
+        poller itself.
+        """
+        options = getattr(self._coordinator, "entry_options_snapshot", None) or {}
+        return parse_key_names(options.get(CONF_KEY_NAMES))
 
     @callback
     def _camera_enabled(self, camera_id: str) -> bool:

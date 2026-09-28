@@ -34,7 +34,9 @@ from .const import (
     CONF_SUBSCRIBER_ID,
     DOMAIN,
     DOORBELL_CALL_WINDOW_FALLBACK_SEC,
+    EVENT_KEY_ACTIVATED,
     LOGGER,
+    SIGNAL_ACCESS_KEY,
     SIGNAL_DOORBELL,
 )
 from .coordinator import MyDomRuConfigEntry, MyDomRuUpdateCoordinator
@@ -57,6 +59,11 @@ EVENT_ENDED = "ended"
 EVENT_CALL_ACCEPTED = "call_accepted"
 EVENT_CALL_MISSED = "call_missed"
 EVENT_MOTION = "motion"
+
+# How many backend event IDs one access entity remembers for dedup. The
+# realtime push and the durable poll both carry `event_id`, so this only has
+# to span one poll interval (5 min) plus slack.
+_RECENT_EVENT_ID_LIMIT = 128
 
 # Авто-`ended`: оператор присылает `ended` только при «принят на другом
 # устройстве». На сброс у домофона / истечение времени ответа end-пуша нет —
@@ -215,14 +222,82 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class MyDomRuPlaceHistoryEvent(
-    CoordinatorEntity[MyDomRuUpdateCoordinator], EventEntity
-):
-    """Aggregate accepted/missed-call history for one configured place."""
+class _AccessEventEntity(CoordinatorEntity[MyDomRuUpdateCoordinator], EventEntity):
+    """Shared plumbing for intercom access events.
+
+    Two delivery paths feed the same entity: the durable REST poll and the
+    realtime `placeEvent` FCM push. Both carry the backend `event_id`, so the
+    same activation can legitimately arrive twice; `_emit` deduplicates on it,
+    and the push (seconds) normally wins the race over the poll (5 min).
+    """
 
     _attr_has_entity_name = True
+
+    def __init__(self, coordinator: MyDomRuUpdateCoordinator) -> None:
+        super().__init__(coordinator)
+        self._history_signal = ""
+        # A dict, not a set: insertion order is what makes evicting the
+        # *oldest* half well defined. `None` values keep membership O(1).
+        self._recent_event_ids: dict[str, None] = {}
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to the durable poll and the realtime push."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass, self._history_signal, self._emit
+            )
+        )
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, SIGNAL_ACCESS_KEY, self._emit)
+        )
+
+    @callback
+    def _emit(self, payload: dict[str, Any]) -> None:
+        """Fire one access event if it belongs here and has not been seen."""
+        if payload.get("event_type") not in self._attr_event_types:
+            return
+        if not self._owns(payload):
+            return
+
+        event_id = str(payload.get("event_id") or "")
+        if event_id:
+            if event_id in self._recent_event_ids:
+                return
+            self._recent_event_ids[event_id] = None
+            if len(self._recent_event_ids) > _RECENT_EVENT_ID_LIMIT:
+                for stale in list(self._recent_event_ids)[
+                    : _RECENT_EVENT_ID_LIMIT // 2
+                ]:
+                    del self._recent_event_ids[stale]
+
+        attributes = {
+            key: payload[key]
+            for key in ("event_id", "occurred_at", "key_name")
+            if payload.get(key) is not None
+        }
+        attributes.update(self._extra_attributes(payload))
+        self._trigger_event(payload["event_type"], attributes)
+        self.async_write_ha_state()
+
+    def _owns(self, payload: dict[str, Any]) -> bool:
+        """Return whether this event belongs to this entity."""
+        raise NotImplementedError
+
+    def _extra_attributes(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return additional safe attributes for the fired event."""
+        return {}
+
+
+class MyDomRuPlaceHistoryEvent(_AccessEventEntity):
+    """Aggregate intercom access history for one configured place."""
+
     _attr_translation_key = "account_history"
-    _attr_event_types = [EVENT_CALL_ACCEPTED, EVENT_CALL_MISSED]
+    _attr_event_types = [
+        EVENT_CALL_ACCEPTED,
+        EVENT_CALL_MISSED,
+        EVENT_KEY_ACTIVATED,
+    ]
 
     def __init__(
         self,
@@ -234,7 +309,10 @@ class MyDomRuPlaceHistoryEvent(
         locks: list[dict[str, Any]],
     ) -> None:
         super().__init__(coordinator)
-        self._place_id = place_id
+        # str(), always: place ids arrive from the API as JSON numbers, and
+        # the payloads reaching `_owns` carry them as strings. Comparing the
+        # two directly would never match, which silently killed this entity.
+        self._place_id = str(place_id)
         self._history_signal = history_dispatch_signal
         self._sources = {
             (str(lock["place_id"]), str(lock["access_control_id"])): str(
@@ -255,57 +333,46 @@ class MyDomRuPlaceHistoryEvent(
             model="Place",
         )
 
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to sanitized durable-history events."""
-        await super().async_added_to_hass()
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                self._history_signal,
-                self._handle_history,
-            )
-        )
-
-    @callback
-    def _handle_history(self, payload: dict[str, Any]) -> None:
-        """Route one verified account event and retain safe source metadata."""
-        event_type = payload.get("event_type")
+    def _owns(self, payload: dict[str, Any]) -> bool:
+        """Own events from a known intercom at this place."""
+        if payload.get("source_type") != "accessControl":
+            return False
         source_key = (
             str(payload.get("place_id") or ""),
             str(payload.get("source_id") or ""),
         )
-        source_name = self._sources.get(source_key)
-        if (
-            event_type not in self._attr_event_types
-            or payload.get("source_type") != "accessControl"
-            or source_key[0] != self._place_id
-            or source_name is None
-        ):
-            return
-        attributes = {
-            key: payload[key]
-            for key in ("event_id", "occurred_at")
-            if key in payload
-        }
-        attributes.update(
-            {
-                "place_id": source_key[0],
-                "source_id": source_key[1],
-                "source_name": source_name,
-            }
+        return source_key[0] == self._place_id and source_key in self._sources
+
+    def _extra_attributes(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Add the intercom this event came from."""
+        source_key = (
+            str(payload.get("place_id") or ""),
+            str(payload.get("source_id") or ""),
         )
-        self._trigger_event(event_type, attributes)
-        self.async_write_ha_state()
+        return {
+            "place_id": source_key[0],
+            "source_id": source_key[1],
+            "source_name": self._sources[source_key],
+        }
 
 
-class MyDomRuAccessHistoryEvent(
-    CoordinatorEntity[MyDomRuUpdateCoordinator], EventEntity
-):
-    """Durable accepted/missed-call history for one access control."""
+class MyDomRuAccessHistoryEvent(_AccessEventEntity):
+    """Durable access history for one access control.
 
-    _attr_has_entity_name = True
+    Carries three event types:
+
+    * `call_accepted` / `call_missed` — a video call to the intercom;
+    * `key_activated` — an access key opened the door, reported within seconds
+      via the realtime FCM push and backfilled by the durable poll if HA was
+      down at the time.
+    """
+
     _attr_translation_key = "access_history"
-    _attr_event_types = [EVENT_CALL_ACCEPTED, EVENT_CALL_MISSED]
+    _attr_event_types = [
+        EVENT_CALL_ACCEPTED,
+        EVENT_CALL_MISSED,
+        EVENT_KEY_ACTIVATED,
+    ]
 
     def __init__(
         self,
@@ -338,35 +405,25 @@ class MyDomRuAccessHistoryEvent(
             via_device_id,
         )
 
-    async def async_added_to_hass(self) -> None:
-        """Subscribe to sanitized durable-history events."""
-        await super().async_added_to_hass()
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass,
-                self._history_signal,
-                self._handle_history,
-            )
-        )
+    def _owns(self, payload: dict[str, Any]) -> bool:
+        """Own events for this intercom at this place.
 
-    @callback
-    def _handle_history(self, payload: dict[str, Any]) -> None:
-        """Route one verified access-control event to this entity."""
-        event_type = payload.get("event_type")
-        if (
-            event_type not in self._attr_event_types
-            or payload.get("source_type") != "accessControl"
-            or str(payload.get("place_id")) != self._place_id
-            or str(payload.get("source_id")) != self._access_control_id
-        ):
-            return
-        attributes = {
-            key: payload[key]
-            for key in ("event_id", "occurred_at")
-            if key in payload
-        }
-        self._trigger_event(event_type, attributes)
-        self.async_write_ha_state()
+        Call events identify the intercom through a source of type
+        `accessControl`. No live `accessKeyActivated` sample was available, so
+        a `subscriberPlace` source is also accepted when its id is this place —
+        both are identifiers this entry already owns, so neither can widen the
+        match beyond this access control.
+        """
+        if str(payload.get("place_id") or "") != self._place_id:
+            return False
+        source_id = str(payload.get("source_id") or "")
+        if source_id == self._access_control_id:
+            return True
+        return (
+            payload.get("event_type") == EVENT_KEY_ACTIVATED
+            and payload.get("source_type") == "subscriberPlace"
+            and source_id == self._place_id
+        )
 
 
 class MyDomRuCameraHistoryEvent(

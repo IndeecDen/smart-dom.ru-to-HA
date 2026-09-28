@@ -24,7 +24,13 @@ _SUBSCRIBER_NOTIFICATIONS = "/rest/v1/subscriberNotifications"
 
 @dataclass(frozen=True, slots=True)
 class HistoryEvent:
-    """Sanitized event DTO used by the durable-history pipeline."""
+    """Sanitized event DTO used by the durable-history pipeline.
+
+    `message` is the one localized field we do carry, and it is consumed
+    inside `history.py` to resolve an access-key label (see `access_keys.py`).
+    It is never forwarded to an entity attribute, so the operator's text and
+    the key code inside it stay out of the recorder and diagnostics.
+    """
 
     id: str
     place_id: str
@@ -32,6 +38,7 @@ class HistoryEvent:
     timestamp: int
     source_type: str
     source_id: str
+    message: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +289,9 @@ class MyDomRuAPI:
                 timestamp=int(item["timestamp"]),
                 source_type=str((item.get("source") or {})["type"]),
                 source_id=str((item.get("source") or {})["id"]),
+                # `message` is required by the backend, but tolerate a missing
+                # one: without it the event still fires, just without a label.
+                message=str(item.get("message") or ""),
             )
             for item in (payload or {}).get("content") or []
         )

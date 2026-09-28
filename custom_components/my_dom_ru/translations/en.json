@@ -122,7 +122,8 @@
           "go2rtc_username": "go2rtc username",
           "go2rtc_password": "go2rtc password",
           "go2rtc_keep_warm": "Publish enabled cameras for external RTSP",
-          "go2rtc_keep_warm_hidden": "Also publish hidden cameras"
+          "go2rtc_keep_warm_hidden": "Also publish hidden cameras",
+          "key_names": "Key labels (one CODE = Name per line)"
         }
       }
     },
@@ -190,14 +191,16 @@
         }
       },
       "access_history": {
-        "name": "Intercom call history",
+        "name": "Intercom access history",
         "state_attributes": {
           "event_type": {
             "state": {
               "call_accepted": "Call accepted",
-              "call_missed": "Call missed"
+              "call_missed": "Call missed",
+              "key_activated": "Opened with an access key"
             }
-          }
+          },
+          "key_name": "Who"
         }
       },
       "account_history": {
@@ -206,7 +209,8 @@
           "event_type": {
             "state": {
               "call_accepted": "Call accepted",
-              "call_missed": "Call missed"
+              "call_missed": "Call missed",
+              "key_activated": "Opened with an access key"
             }
           }
         }
