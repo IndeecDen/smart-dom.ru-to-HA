@@ -38,6 +38,10 @@ jobs:
             echo "manifest $version != tag $tag"
             exit 1
           fi
+          # Persist for the next step: each `run` block is a fresh shell, so a
+          # variable set here is otherwise lost and the manual archive name
+          # collapses to `my_dom_ru--manual.zip`.
+          echo "tag=${tag}" >> "$GITHUB_ENV"
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
