@@ -1,5 +1,9 @@
 # Умный Дом.ру для Home Assistant
 
+<p align="center">
+  <img src="custom_components/my_dom_ru/brand/logo.png" alt="Умный Дом.ру" width="180">
+</p>
+
 [![Release](https://img.shields.io/github/v/release/IndeecDen/smart-dom.ru-to-HA?label=Release)](https://github.com/IndeecDen/smart-dom.ru-to-HA/releases/latest)
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-41f5f4.svg)](https://hacs.xyz)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -230,6 +234,28 @@ npm run build --prefix frontend
 `pytest-homeassistant-custom-component` не работает на Windows из-за `fcntl`) и
 прогоняется в CI: [.github/workflows/ci.yml](.github/workflows/ci.yml).
 Подробнее: [docs/TESTING.md](docs/TESTING.md).
+
+### Графика
+
+Знак нарисован вручную и объединяет глиф дома оператора с синим Home
+Assistant. Исходный PNG в репозитории не хранится; `make_brand.py` только
+нормализует его — обрезает по содержимому, приводит к квадрату, добавляет
+прозрачные поля и пишет шесть файлов, которые Home Assistant ожидает в
+`custom_components/my_dom_ru/brand/`.
+
+```powershell
+.venv/Scripts/python.exe tools/make_brand.py "D:\downloads\smart.dom.ru.png"
+.venv/Scripts/python.exe tools/make_social_preview.py
+```
+
+Прозрачность сохраняется намеренно: у знака белая обводка, и заливка на белый
+фон нарисовала бы белый квадрат, который неверно выглядит на тёмной теме.
+Проверки имён, сигнатуры PNG, квадратности и альфы — в
+`tests/unit/test_brand_assets.py`.
+
+Аватар и social preview репозитория API не позволяет задать (`PATCH` с полем
+`avatar` молча игнорируется, `POST /social_preview` отдаёт 404) — только через
+веб-интерфейс: репозиторий → About → Edit.
 
 ## Документация
 

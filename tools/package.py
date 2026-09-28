@@ -9,12 +9,25 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = ROOT / "custom_components/my_dom_ru"
 
+# `.png` is required by `brand/`: Home Assistant serves integration artwork
+# from `custom_components/<domain>/brand/` via /api/brands/integration, and
+# hardcodes `content_type: image/png` (homeassistant/components/brands). With
+# the suffix filter below omitting `.png`, the artwork was silently dropped
+# from every archive and the UI fell back to the generic placeholder.
+ALLOWED_SUFFIXES = frozenset(
+    {".py", ".json", ".yaml", ".js", ".txt", ".png"}
+)
+
 
 def build() -> list[Path]:
     version = json.loads((COMPONENT / "manifest.json").read_text(encoding="utf-8"))["version"]
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
-    files = sorted(path for path in COMPONENT.rglob("*") if path.is_file() and path.suffix in {".py", ".json", ".yaml", ".js", ".txt"})
+    files = sorted(
+        path
+        for path in COMPONENT.rglob("*")
+        if path.is_file() and path.suffix in ALLOWED_SUFFIXES
+    )
     result = []
     for filename, manual in [("my_dom_ru.zip", False), (f"my_dom_ru-{version}-manual.zip", True)]:
         dest = output / filename
