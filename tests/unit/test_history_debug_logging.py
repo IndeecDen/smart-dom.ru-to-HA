@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,16 @@ from my_dom_ru.history import (  # noqa: E402
 
 CODE = "454e6fb3"
 MESSAGE = f"Адрес открыта ключом {CODE}"
+
+
+def now() -> int:
+    """Current epoch seconds.
+
+    A key is only recognised as a fresh opening inside _KEY_LOOKBACK, so a
+    hardcoded timestamp from when the test was written would age out and start
+    failing for reasons unrelated to what is being tested.
+    """
+    return int(datetime.now(UTC).timestamp())
 
 # The integration's LOGGER is defined in const.py, so its name is not
 # `my_dom_ru.history`. Target the whole package to be safe against that.
@@ -59,7 +70,7 @@ def key_event(**overrides: Any) -> HistoryEvent:
         "id": "e1",
         "place_id": "55",
         "event_type": "accessKeyActivated",
-        "timestamp": 1777213000,
+        "timestamp": now(),
         "source_type": "accessControl",
         "source_id": "101",
         "message": MESSAGE,
@@ -176,6 +187,39 @@ class TestDebugLoggingDoesNotLeak:
         blob = blob_of(records)
         assert CODE not in blob
         assert MESSAGE not in blob
+
+
+class TestKeyDetectionIsBoundedInTime:
+    """A key named in an old message is history, not a fresh opening.
+
+    Without the bound, configuring labels would replay every retained
+    notification in one burst the next time the poller ran.
+    """
+
+    @pytest.mark.asyncio
+    async def test_recent_key_message_is_acted_on(self, records) -> None:
+        await run([key_event()], f"{CODE} = Денис")
+        assert "resolved=Денис" in blob_of(records)
+
+    @pytest.mark.asyncio
+    async def test_stale_key_message_is_not_acted_on(self, records) -> None:
+        stale = key_event(
+            timestamp=now() - int(timedelta(minutes=45).total_seconds())
+        )
+        await run([stale], f"{CODE} = Денис")
+        blob = blob_of(records)
+        assert "Денис" not in blob
+
+    @pytest.mark.asyncio
+    async def test_stale_message_of_a_mapped_type_still_maps(self) -> None:
+        # The bound only suppresses the content-based *key* interpretation.
+        # A real call event from yesterday is still a real call event.
+        stale = key_event(
+            event_type="accessControlCallMissed",
+            timestamp=now() - int(timedelta(hours=3).total_seconds()),
+        )
+        emitted = await run([stale], f"{CODE} = Денис")
+        assert [item["event_type"] for item in emitted] == ["call_missed"]
 
 
 class TestMappingUnchanged:

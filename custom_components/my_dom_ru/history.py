@@ -25,6 +25,11 @@ _GENERAL_EVENT_TYPES = {
 }
 _CAMERA_MOTION_EVENT_SUBJECT_ID = 126
 _CAMERA_LOOKBACK = timedelta(days=1)
+
+# How far back a message may name a key and still count as a fresh door
+# opening. Two poll intervals: long enough to survive one missed poll, short
+# enough that configuring labels cannot replay the whole retained history.
+_KEY_LOOKBACK = timedelta(minutes=10)
 _STORAGE_VERSION = 1
 _MAX_STORED_IDS = 200
 
@@ -188,8 +193,19 @@ class HistoryPoller:
                 )
                 by_source: dict[str, list[str]] = {}
                 unmapped: set[str] = set()
+                # (event, mapped_type, key_name) for everything we act on.
+                #
+                # A door opening is detected by *content*, not by backend
+                # type: on a verified account `accessKeyActivated` never
+                # appears in the API at all, while plain `infoNotification`
+                # pushes do arrive and carry the text naming the key. So any
+                # event whose message contains a configured key code counts,
+                # whatever the operator labelled it.
+                actionable: list[tuple[Any, str | None, str | None]] = []
+                now = datetime.now(UTC)
                 for event in page.events:
-                    if map_general_event_type(event.event_type) is None:
+                    mapped_type = map_general_event_type(event.event_type)
+                    if mapped_type is None:
                         # Not recorded in the watermark. Recording first and
                         # filtering later burns the id permanently: the event
                         # is remembered as "already seen" and dropped, so if
@@ -197,21 +213,35 @@ class HistoryPoller:
                         # That is how accessKeyActivated stayed invisible
                         # forever in 0.1.0.
                         unmapped.add(event.event_type)
+                    key_name = resolve_key_name(event.message, self._key_names())
+                    if key_name is not None and (
+                        now - datetime.fromtimestamp(event.timestamp, UTC)
+                        > _KEY_LOOKBACK
+                    ):
+                        # Older than a couple of poll intervals: this is stored
+                        # history, not a fresh opening. Without this bound,
+                        # configuring labels would replay every retained
+                        # notification at once.
+                        key_name = None
+                    if mapped_type is None and key_name is None:
                         continue
-                    stream = _general_stream_key(event)
-                    by_source.setdefault(stream, []).append(event.id)
+                    actionable.append((event, mapped_type, key_name))
                 if unmapped:
                     LOGGER.debug(
                         "History poll saw %d unmapped backend type(s): %s",
                         len(unmapped),
                         ", ".join(sorted(unmapped)),
                     )
+                for event, _mapped, _label in actionable:
+                    by_source.setdefault(_general_stream_key(event), []).append(
+                        event.id
+                    )
                 new_events = {
                     (stream, event_id)
                     for stream, event_ids in by_source.items()
                     for event_id in self._watermark.ingest(stream, event_ids)
                 }
-                for event in reversed(page.events):
+                for event, mapped_type, key_name in reversed(actionable):
                     if (_general_stream_key(event), event.id) not in new_events:
                         continue
                     mapped_type = map_general_event_type(event.event_type)
@@ -233,7 +263,9 @@ class HistoryPoller:
                         mapped_type or "-",
                     )
                     if mapped_type is None:
-                        continue
+                        # Reached only when the event was actionable purely
+                        # because its message named a configured key.
+                        mapped_type = EVENT_KEY_ACTIVATED
                     payload: dict[str, Any] = {
                         "event_type": mapped_type,
                         "event_id": event.id,
@@ -243,16 +275,16 @@ class HistoryPoller:
                         "source_id": event.source_id,
                     }
                     if mapped_type == EVENT_KEY_ACTIVATED:
-                        # The message is read here and dropped: only the label
-                        # it resolves to leaves this module.
-                        key_name = resolve_key_name(
-                            event.message, self._key_names()
-                        )
+                        # The message was read to build `key_name` above and is
+                        # dropped here: only the label leaves this module, so
+                        # the key code stays out of entities and diagnostics.
                         if key_name:
                             payload["key_name"] = key_name
                         LOGGER.debug(
-                            "Key activation id=%s source=%s:%s resolved=%s",
+                            "Key activation id=%s backend_type=%s "
+                            "source=%s:%s resolved=%s",
                             event.id,
+                            event.event_type,
                             event.source_type,
                             event.source_id,
                             key_name or "NO_LABEL_MATCH",

@@ -34,7 +34,9 @@ def make_event(
         id=event_id,
         place_id="55",
         event_type=event_type,
-        timestamp=1777213000,
+        # A key named in the message only counts inside the poller's
+        # _KEY_LOOKBACK window, so the timestamp has to be current.
+        timestamp=int(datetime.now(UTC).timestamp()),
         source_type=source_type,
         source_id=source_id,
         message=message,
