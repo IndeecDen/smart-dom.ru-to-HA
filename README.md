@@ -167,13 +167,21 @@ actions:
   - action: notify.telegram
     data:
       message: >-
-        {% set who = trigger.to_state.attributes.get('key_name') %}
+        {% set who = trigger.to_state.attributes.get('key_name')
+           if trigger is defined and trigger.to_state is defined else none %}
         {{ who ~ ' открыл домофон' if who else 'Кто-то открыл домофон ключом' }}
 ```
 
-Атрибуты читаются через `trigger.to_state.attributes`, а не `trigger.event.data`:
-у триггера `state` в шаблон попадают `from_state`, `to_state`, `for` и
-`attribute` — объекта `event` среди них нет.
+Две особенности шаблона, обе проверены рендерингом:
+
+- атрибуты читаются через `trigger.to_state.attributes`, а не
+  `trigger.event.data`: у триггера `state` в шаблон попадают `from_state`,
+  `to_state`, `for` и `attribute` — объекта `event` среди них нет;
+- проверка `trigger is defined and trigger.to_state is defined` нужна, чтобы
+  шаблон не падал при ручном запуске. Кнопка «Run» у автоматизации
+  подставляет `{"platform": None}`, а «Выполнить действие» в редакторе скрипта
+  не подставляет `trigger` вовсе. Без проверки в обоих случаях будет
+  `UndefinedError`.
 
 Если сопоставление не заполнено, HA покажет «Дверь открыта ключом …» в истории
 приложения, но `key_name` будет пустым. Проверить можно автоматизацией или
