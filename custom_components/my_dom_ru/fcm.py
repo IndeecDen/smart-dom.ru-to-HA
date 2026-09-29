@@ -32,7 +32,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
-from .access_keys import parse_key_names, resolve_key_name
+from .access_keys import mask_secrets, parse_key_names, resolve_key_name
 from .api import MyDomRuAPI
 from .const import (
     CONF_FCM_CREDENTIALS,
@@ -575,14 +575,44 @@ class DoorbellFcmListener:
             # body is operator text and may embed a key code.
             LOGGER.debug("FCM: placeEvent не разобран (%s) — пропуск", type(raw).__name__)
             return True
-        if event["event_type"] != _PUSH_ACCESS_KEY_EVENT:
-            # Not one of ours, but worth seeing: it proves the push channel is
-            # alive even when we ignore the event. Body is not logged.
+        key_name = resolve_key_name(
+            event["message"],
+            parse_key_names((self._entry.options or {}).get(CONF_KEY_NAMES)),
+        )
+        by_type = event["event_type"] == _PUSH_ACCESS_KEY_EVENT
+        if not by_type and key_name is None:
+            # Neither the type we expect nor a key in the text: not ours.
+            # Still worth logging, because it proves the push channel is alive
+            # even when we ignore the event. Body is never logged.
             LOGGER.debug(
-                "FCM: placeEvent %s получен и не обрабатывается",
+                "FCM: placeEvent %s получен и не обрабатывается: %s",
                 event["event_type"],
+                mask_secrets(event["message"]),
             )
             return True
+        if by_type:
+            LOGGER.debug(
+                "FCM: key activation по типу accessKeyActivated id=%s "
+                "source=%s:%s resolved=%s",
+                event["event_id"],
+                event["source_type"],
+                event["source_id"],
+                key_name or "NO_LABEL_MATCH",
+            )
+        else:
+            # A door opening identified by its text, under a type the operator
+            # did not name accessKeyActivated. Observed on a verified account:
+            # the API never returns accessKeyActivated at all, but a plain
+            # infoNotification arrives within a second of a key being applied.
+            LOGGER.debug(
+                "FCM: placeEvent %s распознан как проход ключом id=%s "
+                "source=%s:%s resolved=%s",
+                event["event_type"],
+                event["event_id"],
+                event["source_type"],
+                event["source_id"],
+                key_name,
+            )
         payload: dict[str, Any] = {
             "event_type": EVENT_KEY_ACTIVATED,
             "event_id": event["event_id"],
@@ -591,21 +621,7 @@ class DoorbellFcmListener:
             "source_type": event["source_type"],
             "source_id": event["source_id"],
         }
-        key_name = resolve_key_name(
-            event["message"],
-            parse_key_names((self._entry.options or {}).get(CONF_KEY_NAMES)),
-        )
         if key_name:
             payload["key_name"] = key_name
-        # Diagnostic: shows whether the realtime channel works at all, and
-        # whether the label resolved. Never logs the message, which carries
-        # the key code.
-        LOGGER.debug(
-            "FCM: key activation id=%s source=%s:%s resolved=%s",
-            event["event_id"],
-            event["source_type"],
-            event["source_id"],
-            key_name or "NO_LABEL_MATCH",
-        )
         async_dispatcher_send(self._hass, SIGNAL_ACCESS_KEY, payload)
         return True

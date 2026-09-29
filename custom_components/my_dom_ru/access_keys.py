@@ -119,3 +119,26 @@ def resolve_key_name(message: Any, key_names: Mapping[str, str]) -> str | None:
         if code in haystack:
             return key_names[code]
     return None
+
+
+# Runs of four or more ASCII alphanumerics. A key code is exactly this shape;
+# so are phone numbers and identifiers, which must not reach a log either.
+_SECRET_RUN = re.compile(r"[0-9A-Za-z]{4,}")
+
+
+def mask_secrets(text: Any) -> str:
+    """Return `text` with every identifier-like run replaced by `***`.
+
+    Used for diagnostics: it keeps the sentence readable — "адрес открыта
+    ключом ***" — while making it safe to put in a log that a user may paste
+    into an issue. Cyrillic words are untouched, since the class is ASCII only.
+
+    Args:
+        text: The operator message, or `None`.
+
+    Returns:
+        The masked text, or an empty string for a falsy input.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    return _SECRET_RUN.sub("***", text)

@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
 from my_dom_ru.access_keys import (  # noqa: E402
+    mask_secrets,
     normalize_code,
     parse_key_names,
     resolve_key_name,
@@ -104,3 +105,44 @@ class TestResolveKeyName:
     @pytest.mark.parametrize("raw", ["", "   ", "нет знака равенства тут"])
     def test_garbage_input_is_harmless(self, raw: str) -> None:
         assert isinstance(parse_key_names(raw), dict)
+
+
+class TestMaskSecrets:
+    """Diagnostic previews must stay readable but must not leak a key code."""
+
+    def test_code_is_masked_but_sentence_survives(self) -> None:
+        masked = mask_secrets("Адрес открыта ключом 454E6FB3")
+        assert masked == "Адрес открыта ключом ***"
+
+    def test_lowercase_and_digits_masked(self) -> None:
+        assert mask_secrets("код 454e6fb3") == "код ***"
+
+    def test_cyrillic_words_are_untouched(self) -> None:
+        # The class is ASCII-only, so Russian prose stays readable — that is
+        # the whole point of logging a preview at all.
+        text = "Доступ предоставлен жильцу"
+        assert mask_secrets(text) == text
+
+    def test_contiguous_long_digits_are_masked(self) -> None:
+        # A key code is always contiguous, which is what this masks.
+        assert mask_secrets("ид 9161234567") == "ид ***"
+
+    def test_spaced_groups_are_not_masked(self) -> None:
+        # Known limitation, documented rather than papered over: the class is a
+        # contiguous run, so digits split by spaces survive. That is deliberate
+        # — widening it to spaced groups would mangle ordinary prose. Key
+        # codes are contiguous, which is the case that matters here.
+        assert mask_secrets("звоните +7 916 123 45 67") == "звоните +7 916 123 45 67"
+
+    def test_short_runs_survive(self) -> None:
+        # Fewer than four characters is not an identifier shape.
+        assert mask_secrets("код 12") == "код 12"
+
+    def test_non_string_is_empty(self) -> None:
+        assert mask_secrets(None) == ""
+        assert mask_secrets(123) == ""
+
+    def test_original_code_never_appears_in_output(self) -> None:
+        code = "454E6FB3"
+        assert code not in mask_secrets(f"открыта ключом {code}")
+        assert code.lower() not in mask_secrets(f"открыта ключом {code}")

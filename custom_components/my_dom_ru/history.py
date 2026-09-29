@@ -15,7 +15,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
 from .const import CONF_KEY_NAMES, DOMAIN, EVENT_KEY_ACTIVATED, LOGGER
-from .access_keys import parse_key_names, resolve_key_name
+from .access_keys import mask_secrets, parse_key_names, resolve_key_name
 
 
 _GENERAL_EVENT_TYPES = {
@@ -232,6 +232,18 @@ class HistoryPoller:
                         len(unmapped),
                         ", ".join(sorted(unmapped)),
                     )
+                # One masked sample per unmapped type, so a missing feature can
+                # be recognised from the sentence shape without putting the key
+                # code in a log the user may paste into an issue.
+                for sample_type in sorted(unmapped):
+                    for event in page.events:
+                        if event.event_type == sample_type:
+                            LOGGER.debug(
+                                "Unmapped %s sample: %s",
+                                sample_type,
+                                mask_secrets(event.message),
+                            )
+                            break
                 for event, _mapped, _label in actionable:
                     by_source.setdefault(_general_stream_key(event), []).append(
                         event.id
