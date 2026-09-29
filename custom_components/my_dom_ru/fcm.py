@@ -650,6 +650,11 @@ class DoorbellFcmListener:
                 mask_secrets(event["message"]),
             )
             return True
+        # Set before either branch: the content path is the common one on a
+        # verified account, and leaving it to the `by_type` branch raised
+        # UnboundLocalError exactly there — the event was recognised and then
+        # dropped on the way to the entity.
+        by_content = not by_type
         if by_type:
             LOGGER.debug(
                 "FCM: key activation по типу accessKeyActivated id=%s "
@@ -659,7 +664,6 @@ class DoorbellFcmListener:
                 event["source_id"],
                 key_name or "NO_LABEL_MATCH",
             )
-            by_content = False
         else:
             # A door opening identified by its text, under a type the operator
             # did not name accessKeyActivated. Observed on a verified account:

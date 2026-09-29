@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 import sys
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
+from my_dom_ru.access_keys import resolve_key_identity  # noqa: E402
 from my_dom_ru.fcm import parse_place_event  # noqa: E402
 
 
@@ -113,3 +115,94 @@ class TestParsePlaceEvent:
         parsed = parse_place_event(make_push(event_type="cameraMoving"))
         assert parsed is not None
         assert parsed["event_type"] == "cameraMoving"
+
+
+class TestHandlePlaceEvent:
+    """The handler that turns a parsed push into a dispatched payload.
+
+    `parse_place_event` was well covered while the handler around it was not,
+    and that gap let a live bug through: `by_content` was only assigned inside
+    the `by_type` branch, so the common path — a key opening arriving as
+    `infoNotification` — raised UnboundLocalError *after* the event had been
+    recognised, and was then dropped on the floor.
+    """
+
+    KEYS = [{"id": 1, "accessKey": {"accessKeyCode": "5034 0C4B", "name": "Денис"}}]
+
+    def make_listener(self, keys=None):
+        from my_dom_ru.access_keys import build_key_index
+        from my_dom_ru.fcm import DoorbellFcmListener
+
+        listener = DoorbellFcmListener.__new__(DoorbellFcmListener)
+        listener._hass = MagicMock()
+        listener._key_index = build_key_index(keys) if keys else {}
+        dispatched: list[tuple[str, dict]] = []
+        return listener, dispatched
+
+    def handle(self, listener, dispatched, push: str) -> bool:
+        with patch(
+            "my_dom_ru.fcm.async_dispatcher_send",
+            side_effect=lambda hass, signal, payload: dispatched.append(
+                (signal, payload)
+            ),
+        ):
+            return listener._async_handle_place_event({"u": push})
+
+    def test_info_notification_with_a_key_becomes_key_activated(self) -> None:
+        from my_dom_ru.const import EVENT_KEY_ACTIVATED, SIGNAL_ACCESS_KEY
+
+        listener, dispatched = self.make_listener(self.KEYS)
+        self.handle(
+            listener,
+            dispatched,
+            make_push(
+                event_type="infoNotification",
+                source_type="billingSystem",
+                source_id=18,
+                message="30 Лет Октября 6 (п. 3) открыта ключом Денис.",
+            ),
+        )
+        assert len(dispatched) == 1
+        signal, payload = dispatched[0]
+        assert signal == SIGNAL_ACCESS_KEY
+        assert payload["event_type"] == EVENT_KEY_ACTIVATED
+        assert payload["key_name"] == "Денис"
+        # The regression: this flag was unset on the content path.
+        assert payload["by_content"] is True
+
+    def test_typed_key_event_is_not_flagged_as_content(self) -> None:
+        listener, dispatched = self.make_listener(self.KEYS)
+        self.handle(
+            listener,
+            dispatched,
+            make_push(message="открыта ключом Денис", source_id=101),
+        )
+        assert dispatched[0][1]["by_content"] is False
+
+    def test_unknown_event_without_a_key_is_ignored(self) -> None:
+        listener, dispatched = self.make_listener(self.KEYS)
+        assert self.handle(
+            listener,
+            dispatched,
+            make_push(event_type="billingNotification", message="Счёт выставлен"),
+        )
+        assert dispatched == []
+
+    def test_raw_text_never_reaches_the_payload(self) -> None:
+        listener, dispatched = self.make_listener(self.KEYS)
+        self.handle(
+            listener,
+            dispatched,
+            make_push(event_type="infoNotification",
+                      message="открыта ключом Денис"),
+        )
+        # The operator text embeds the address; it must not reach the recorder.
+        assert "message" not in dispatched[0][1]
+        assert "30 Лет" not in str(dispatched[0][1])
+
+    def test_missing_event_push_is_left_to_the_call_channel(self) -> None:
+        listener, dispatched = self.make_listener(self.KEYS)
+        assert listener._async_handle_place_event({}) is False
+        assert dispatched == []
+
+
