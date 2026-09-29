@@ -12,6 +12,7 @@ from aiohttp import ClientError, ClientResponse
 
 from homeassistant.core import HomeAssistant
 
+from .const import APP_ID
 from .http import error_status, HTTP
 from .user_agent import UserAgent
 
@@ -615,7 +616,7 @@ class MyDomRuAPI:
         body: dict[str, Any] = {
             "appVersionCode": int(ua.app_version["code"]),
             "installationId": ua.uuid,
-            "appId": 2,
+            "appId": APP_ID,
             "appVersion": ua.app_version["name"],
             "platform": "google",
             "isDevelop": False,
