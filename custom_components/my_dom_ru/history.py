@@ -163,6 +163,14 @@ class HistoryPoller:
                 )
             else:
                 any_success = True
+                # Diagnostic: proves the poll reached the backend at all, and
+                # whether the page was empty. Without it, a silently failing
+                # poll and an empty result look identical from the outside.
+                LOGGER.debug(
+                    "History poll ok: %d events, last=%s",
+                    len(page.events),
+                    page.last,
+                )
                 by_source: dict[str, list[str]] = {}
                 for event in page.events:
                     stream = _general_stream_key(event)
@@ -173,11 +181,27 @@ class HistoryPoller:
                     for event_id in self._watermark.ingest(stream, event_ids)
                 }
                 for event in reversed(page.events):
+                    if (_general_stream_key(event), event.id) not in new_events:
+                        continue
                     mapped_type = map_general_event_type(event.event_type)
-                    if (
-                        (_general_stream_key(event), event.id) not in new_events
-                        or mapped_type is None
-                    ):
+                    # Diagnostic. The backend type, source and placement are all
+                    # needed to tell "the event never arrived" apart from
+                    # "it arrived and no entity claimed it" — the difference is
+                    # invisible from the UI, since both look like no event.
+                    # The message is deliberately absent: it embeds the key
+                    # code, and the resolved label below is enough.
+                    LOGGER.debug(
+                        "History event id=%s backend_type=%s source=%s:%s "
+                        "place=%s ts=%s mapped=%s",
+                        event.id,
+                        event.event_type,
+                        event.source_type,
+                        event.source_id,
+                        event.place_id,
+                        event.timestamp,
+                        mapped_type or "-",
+                    )
+                    if mapped_type is None:
                         continue
                     payload: dict[str, Any] = {
                         "event_type": mapped_type,
@@ -195,6 +219,13 @@ class HistoryPoller:
                         )
                         if key_name:
                             payload["key_name"] = key_name
+                        LOGGER.debug(
+                            "Key activation id=%s source=%s:%s resolved=%s",
+                            event.id,
+                            event.source_type,
+                            event.source_id,
+                            key_name or "NO_LABEL_MATCH",
+                        )
                     self._emit(payload)
 
         upper = datetime.now(UTC).replace(microsecond=0)

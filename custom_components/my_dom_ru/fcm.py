@@ -576,6 +576,12 @@ class DoorbellFcmListener:
             LOGGER.debug("FCM: placeEvent не разобран (%s) — пропуск", type(raw).__name__)
             return True
         if event["event_type"] != _PUSH_ACCESS_KEY_EVENT:
+            # Not one of ours, but worth seeing: it proves the push channel is
+            # alive even when we ignore the event. Body is not logged.
+            LOGGER.debug(
+                "FCM: placeEvent %s получен и не обрабатывается",
+                event["event_type"],
+            )
             return True
         payload: dict[str, Any] = {
             "event_type": EVENT_KEY_ACTIVATED,
@@ -591,5 +597,15 @@ class DoorbellFcmListener:
         )
         if key_name:
             payload["key_name"] = key_name
+        # Diagnostic: shows whether the realtime channel works at all, and
+        # whether the label resolved. Never logs the message, which carries
+        # the key code.
+        LOGGER.debug(
+            "FCM: key activation id=%s source=%s:%s resolved=%s",
+            event["event_id"],
+            event["source_type"],
+            event["source_id"],
+            key_name or "NO_LABEL_MATCH",
+        )
         async_dispatcher_send(self._hass, SIGNAL_ACCESS_KEY, payload)
         return True
