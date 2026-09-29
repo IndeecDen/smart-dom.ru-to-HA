@@ -198,12 +198,21 @@ async def async_setup_entry(
         )
         for lock_info in by_ac.values()
     )
+    # How many distinct interlocks each place has. A key event names the
+    # address, not the entrance, so it is only attributable to a door when
+    # the place has exactly one.
+    interlocks_per_place: dict[str, set[str]] = {}
+    for place_id, access_control_id in by_ac:
+        interlocks_per_place.setdefault(place_id, set()).add(access_control_id)
     entities.extend(
         MyDomRuAccessHistoryEvent(
             coordinator,
             lock_info,
             entry_history_signal,
             place_device_id(hass, entry.entry_id, str(lock_info["place_id"])),
+            sole_intercom=(
+                len(interlocks_per_place.get(str(lock_info["place_id"]), ())) == 1
+            ),
         )
         for lock_info in by_ac.values()
     )
@@ -334,25 +343,40 @@ class MyDomRuPlaceHistoryEvent(_AccessEventEntity):
         )
 
     def _owns(self, payload: dict[str, Any]) -> bool:
-        """Own events from a known intercom at this place."""
+        """Own events from a known intercom at this place.
+
+        A key event identified by its text is also owned when it belongs to
+        this place, whatever its source: the operator files those under
+        `billingSystem` and names the address rather than the entrance, so
+        this place-level stream is the only place they can honestly be
+        reported. `source_name` is then absent, because there is no intercom
+        to name.
+        """
+        if str(payload.get("place_id") or "") != self._place_id:
+            return False
+        if payload.get("by_content"):
+            return True
         if payload.get("source_type") != "accessControl":
             return False
         source_key = (
             str(payload.get("place_id") or ""),
             str(payload.get("source_id") or ""),
         )
-        return source_key[0] == self._place_id and source_key in self._sources
+        return source_key in self._sources
 
     def _extra_attributes(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Add the intercom this event came from."""
+        """Add the intercom this event came from, when there is one."""
         source_key = (
             str(payload.get("place_id") or ""),
             str(payload.get("source_id") or ""),
         )
+        name = self._sources.get(source_key)
+        if name is None:
+            return {"place_id": source_key[0]}
         return {
             "place_id": source_key[0],
             "source_id": source_key[1],
-            "source_name": self._sources[source_key],
+            "source_name": name,
         }
 
 
@@ -380,12 +404,15 @@ class MyDomRuAccessHistoryEvent(_AccessEventEntity):
         lock_info: dict[str, Any],
         history_dispatch_signal: str,
         via_device_id: str | None = None,
+        *,
+        sole_intercom: bool = False,
     ) -> None:
         super().__init__(coordinator)
         place_id = str(lock_info["place_id"])
         access_control_id = str(lock_info["access_control_id"])
         self._place_id = place_id
         self._access_control_id = access_control_id
+        self._sole_intercom = sole_intercom
         self._history_signal = history_dispatch_signal
         entrance_id = lock_info.get("entrance_id")
         self._attr_unique_id = (
@@ -409,20 +436,26 @@ class MyDomRuAccessHistoryEvent(_AccessEventEntity):
         """Own events for this intercom at this place.
 
         Call events identify the intercom through a source of type
-        `accessControl`. No live `accessKeyActivated` sample was available, so
-        a `subscriberPlace` source is also accepted when its id is this place —
-        both are identifiers this entry already owns, so neither can widen the
-        match beyond this access control.
+        `accessControl`.
+
+        Key events are harder. On a verified account the operator reports them
+        under `source=billingSystem`, and the message names the *address*,
+        never the entrance — so the door genuinely cannot be read off the
+        event. The event is claimed only when this is the sole intercom at the
+        place, where "the door" is unambiguous. With several entrances the
+        place-level entity still reports it and this one stays silent, rather
+        than firing once per door and being wrong most of the time.
         """
         if str(payload.get("place_id") or "") != self._place_id:
             return False
-        source_id = str(payload.get("source_id") or "")
-        if source_id == self._access_control_id:
+        if str(payload.get("source_id") or "") == self._access_control_id:
             return True
+        if payload.get("by_content"):
+            return self._sole_intercom
         return (
             payload.get("event_type") == EVENT_KEY_ACTIVATED
             and payload.get("source_type") == "subscriberPlace"
-            and source_id == self._place_id
+            and str(payload.get("source_id") or "") == self._place_id
         )
 
 

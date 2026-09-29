@@ -56,6 +56,7 @@ def payload(**overrides: Any) -> dict[str, Any]:
         "source_type": "accessControl",
         "source_id": "101",
         "key_name": "Сын",
+        "by_content": False,
     }
     base.update(overrides)
     return base
@@ -168,7 +169,6 @@ class TestDeduplication:
 
 class TestPlaceHistorySharesTheBase:
     """The place-level entity must get key events and the same dedup."""
-
     def make_place_entity(self):
         coordinator = MagicMock(spec=MyDomRuUpdateCoordinator)
         # place_display_name reads coordinator.data when building DeviceInfo.
@@ -236,3 +236,83 @@ class TestPlaceHistorySharesTheBase:
             )
         )
         assert len(entity._fired) == 1
+
+    def test_content_key_event_from_billing_source_is_owned(self) -> None:
+        # Verified on a real account: the operator files key openings under
+        # source=billingSystem and names the address, so nothing matches an
+        # intercom. The place-level stream is where it can be reported.
+        entity = self.make_place_entity()
+        entity._emit(
+            payload(source_type="billingSystem", source_id="18", by_content=True)
+        )
+        assert len(entity._fired) == 1
+
+    def test_content_key_event_omits_intercom_name(self) -> None:
+        # There is no intercom to name, so the attribute must be absent rather
+        # than a wrong one.
+        entity = self.make_place_entity()
+        entity._emit(
+            payload(source_type="billingSystem", source_id="18", by_content=True)
+        )
+        _, attributes = entity._fired[0]
+        assert "source_name" not in attributes
+        assert attributes["key_name"] == "Сын"
+
+    def test_content_key_event_of_another_place_is_ignored(self) -> None:
+        entity = self.make_place_entity()
+        entity._emit(
+            payload(
+                place_id="999",
+                source_type="billingSystem",
+                source_id="18",
+                by_content=True,
+            )
+        )
+        assert entity._fired == []
+
+
+class TestIntercomClaimsContentKeyEvent:
+    """An intercom may claim a key event only when the door is unambiguous."""
+
+    def make_sole(self):
+        entity = MyDomRuAccessHistoryEvent(
+            MagicMock(spec=MyDomRuUpdateCoordinator),
+            LOCK,
+            "sig",
+            sole_intercom=True,
+        )
+        entity.hass = MagicMock(spec=HomeAssistant)
+        fired: list[tuple[str, dict]] = []
+        entity._fired = fired
+        entity._trigger_event = lambda event_type, attrs: fired.append(
+            (event_type, attrs)
+        )
+        entity.async_write_ha_state = lambda: None
+        return entity
+
+    def test_sole_intercom_claims_it(self) -> None:
+        entity = self.make_sole()
+        entity._emit(
+            payload(source_type="billingSystem", source_id="18", by_content=True)
+        )
+        assert len(entity._fired) == 1
+
+    def test_one_of_several_intercoms_does_not(self) -> None:
+        # With more than one door, claiming it on one of them would be a guess.
+        entity = MyDomRuAccessHistoryEvent(
+            MagicMock(spec=MyDomRuUpdateCoordinator),
+            LOCK,
+            "sig",
+            sole_intercom=False,
+        )
+        entity.hass = MagicMock(spec=HomeAssistant)
+        fired: list[tuple[str, dict]] = []
+        entity._fired = fired
+        entity._trigger_event = lambda event_type, attrs: fired.append(
+            (event_type, attrs)
+        )
+        entity.async_write_ha_state = lambda: None
+        entity._emit(
+            payload(source_type="billingSystem", source_id="18", by_content=True)
+        )
+        assert fired == []

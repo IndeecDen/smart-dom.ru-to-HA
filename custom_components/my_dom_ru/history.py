@@ -293,6 +293,13 @@ class HistoryPoller:
                         "place_id": event.place_id,
                         "source_type": event.source_type,
                         "source_id": event.source_id,
+                        # See the same flag in fcm.py: the operator reports
+                        # these under `billingSystem`, so no door can be
+                        # identified from the source.
+                        "by_content": (
+                            mapped_type == EVENT_KEY_ACTIVATED
+                            and map_general_event_type(event.event_type) is None
+                        ),
                     }
                     if mapped_type == EVENT_KEY_ACTIVATED:
                         # The message was read to build `key_name` above and is

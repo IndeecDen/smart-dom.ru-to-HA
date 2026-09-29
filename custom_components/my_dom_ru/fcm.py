@@ -665,6 +665,7 @@ class DoorbellFcmListener:
                 event["source_id"],
                 key_name or "NO_LABEL_MATCH",
             )
+            by_content = False
         else:
             # A door opening identified by its text, under a type the operator
             # did not name accessKeyActivated. Observed on a verified account:
@@ -687,6 +688,11 @@ class DoorbellFcmListener:
             "place_id": event["place_id"],
             "source_type": event["source_type"],
             "source_id": event["source_id"],
+            # The operator's source for these is `billingSystem`, not the
+            # intercom, so nothing downstream can match on it. `by_content`
+            # tells the entities the identity came from the message text and
+            # that the place — not a door — is all we can honestly claim.
+            "by_content": by_content,
         }
         if key_name:
             payload["key_name"] = key_name
