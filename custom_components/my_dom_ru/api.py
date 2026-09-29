@@ -116,6 +116,29 @@ class MyDomRuAPI:
             raise ValueError("missing_phone")
         return self._phone
 
+    async def query_access_keys(self, place_id: str | int) -> list[Any]:
+        """List the place's access keys in the operator's raw shape.
+
+        Used to learn who each key belongs to. The operator's own names are
+        the source of truth — a key named "Денис" appears in the door-opening
+        notification as "Денис", with no code anywhere — so nothing has to be
+        configured to turn a door opening into a name.
+
+        Failures return an empty list: a missing name mapping degrades the
+        event to an anonymous "someone opened with a key", which is far better
+        than dropping the event.
+        """
+        from .app_api import AppApi, unwrap  # noqa: PLC0415
+
+        try:
+            payload = await AppApi(self.http).execute(
+                "list_access_keys", {"place_id": place_id}
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        result = unwrap(payload)
+        return result if isinstance(result, list) else []
+
     async def query_contracts(self, phone: str) -> dict[str, Any]:
         """Query the list of contracts for the given phone number."""
         self._phone = phone

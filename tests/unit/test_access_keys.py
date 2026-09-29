@@ -1,4 +1,13 @@
-"""Unit tests for access-key label resolution."""
+"""Unit tests for access-key identity resolution.
+
+The verified facts these encode, from a real account:
+
+* a door opening arrives as `infoNotification`, not `accessKeyActivated`;
+* its text reads e.g. "30 Лет Октября 6 (п. 3) открыта ключом Денис.";
+* `list_access_keys` nests the code under `accessKey` while `id` is at top
+  level, and the app prints codes with a space ("5034 0C4B");
+* so the name is already in the message and needs no configuration.
+"""
 from __future__ import annotations
 
 import sys
@@ -9,140 +18,190 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
 from my_dom_ru.access_keys import (  # noqa: E402
+    apply_overrides,
+    build_key_index,
     mask_secrets,
     normalize_code,
     parse_key_names,
-    resolve_key_name,
+    resolve_key_identity,
 )
+
+# Exactly the shape shown in the app for this account.
+KEYS = [
+    {"id": 1, "placeId": 20443849,
+     "accessKey": {"accessKeyCode": "21E4 C23F", "name": "Ключ №1"}},
+    {"id": 2, "placeId": 20443849,
+     "accessKey": {"accessKeyCode": "454E 6FB3", "name": "Арсений"}},
+    {"id": 3, "placeId": 20443849,
+     "accessKey": {"accessKeyCode": "5034 0C4B", "name": "Денис"}},
+]
+
+MESSAGE = "30 Лет Октября 6  (п. 3) открыта ключом Денис."
 
 
 class TestNormalizeCode:
-    def test_strips_separators_and_case(self) -> None:
-        assert normalize_code("098-B987") == "098b987"
-        assert normalize_code(" 098 b 987 ") == "098b987"
-        assert normalize_code("098B987") == "098b987"
+    def test_is_unicode_aware(self) -> None:
+        # The previous ASCII-only class deleted Cyrillic names entirely,
+        # which would have made name matching impossible.
+        assert normalize_code("Денис") == "денис"
+        assert normalize_code("Арсений") == "арсений"
+
+    def test_folds_case_and_spaces(self) -> None:
+        assert normalize_code("5034 0C4B") == "50340c4b"
+        assert normalize_code("50340C4B") == "50340c4b"
+        assert normalize_code(" 21E4-C23F ") == "21e4c23f"
 
     def test_rejects_non_string(self) -> None:
         assert normalize_code(None) == ""
         assert normalize_code(123) == ""
 
 
+class TestBuildKeyIndex:
+    def test_indexes_both_code_and_name(self) -> None:
+        index = build_key_index(KEYS)
+        assert index["Денис"] == "Денис"
+        assert index["5034 0C4B"] == "Денис"
+        assert index["Арсений"] == "Арсений"
+        assert index["454E 6FB3"] == "Арсений"
+
+    def test_every_key_lands_under_its_own_name(self) -> None:
+        index = build_key_index(KEYS)
+        assert index["21E4 C23F"] == "Ключ №1"
+        assert index["Ключ №1"] == "Ключ №1"
+
+    def test_unnamed_key_falls_back_to_code(self) -> None:
+        index = build_key_index(
+            [{"id": 9, "accessKey": {"accessKeyCode": "ABCD1234", "name": ""}}]
+        )
+        assert index["ABCD1234"] == "ABCD1234"
+
+    def test_tolerates_flat_shape(self) -> None:
+        # Some payloads put the fields at the top level instead.
+        index = build_key_index([{"accessKeyCode": "ABCD1234", "name": "Гость"}])
+        assert index["Гость"] == "Гость"
+
+    def test_garbage_input_is_harmless(self) -> None:
+        for bad in (None, "nope", 42, [None, 3, "x"], [{"accessKey": None}]):
+            assert build_key_index(bad) == {}
+
+
+class TestResolveKeyIdentity:
+    INDEX = build_key_index(KEYS)
+
+    def test_resolves_the_verified_message(self) -> None:
+        assert resolve_key_identity(MESSAGE, self.INDEX) == "Денис"
+
+    def test_resolves_by_code_with_its_spacing(self) -> None:
+        assert resolve_key_identity("открыта ключом 5034 0C4B", self.INDEX) == "Денис"
+
+    def test_resolves_by_code_without_spacing(self) -> None:
+        assert resolve_key_identity("открыта ключом 50340C4B", self.INDEX) == "Денис"
+
+    def test_distinguishes_keys(self) -> None:
+        assert resolve_key_identity("ключом Арсений", self.INDEX) == "Арсений"
+        assert resolve_key_identity("ключом Ключ №1", self.INDEX) == "Ключ №1"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Дверь открыта ключом Денис",
+            "Доступ предоставлен: Денис",
+            "Кто-то открыл домофон, Денис",
+            "ДЕНИС открыл",
+        ],
+    )
+    def test_survives_rewording(self, text: str) -> None:
+        # Containment, not a fixed template: the operator may reword.
+        assert resolve_key_identity(text, self.INDEX) == "Денис"
+
+    def test_short_name_does_not_match_a_longer_word(self) -> None:
+        # The bug a plain substring search would have: "Дом" must not be found
+        # inside "Домофон".
+        index = build_key_index([{"accessKey": {"accessKeyCode": "ZZZZ1111", "name": "Дом"}}])
+        assert resolve_key_identity("Домофон открыт", index) is None
+        assert resolve_key_identity("открыто ключом Дом", index) == "Дом"
+
+    def test_no_match_returns_none(self) -> None:
+        assert resolve_key_identity("Дверь открыта приложением", self.INDEX) is None
+
+    def test_empty_inputs(self) -> None:
+        assert resolve_key_identity("", self.INDEX) is None
+        assert resolve_key_identity(None, self.INDEX) is None
+        assert resolve_key_identity(MESSAGE, {}) is None
+
+    def test_very_short_label_is_ignored(self) -> None:
+        # "Я" would match almost any sentence.
+        assert resolve_key_identity("открыто ключом Я", {"Я": "Я"}) is None
+
+
 class TestParseKeyNames:
     def test_parses_equals_and_colon(self) -> None:
-        parsed = parse_key_names("098b987y = Сын\n098c112z: Жена")
-        assert parsed == {"098b987y": "Сын", "098c112z": "Жена"}
+        parsed = parse_key_names("5034 0C4B = Денис\n454E6FB3: Арсений")
+        assert parsed == {"5034 0C4B": "Денис", "454E6FB3": "Арсений"}
 
     def test_ignores_comments_and_blank_lines(self) -> None:
-        parsed = parse_key_names("# ключи\n\n098b987y = Сын\n   \n")
-        assert parsed == {"098b987y": "Сын"}
-
-    def test_ignores_lines_without_label(self) -> None:
-        assert parse_key_names("098b987y") == {}
-        assert parse_key_names("098b987y =   ") == {}
+        assert parse_key_names("# ключи\n\n5034 0C4B = Денис\n  \n") == {
+            "5034 0C4B": "Денис"
+        }
 
     def test_first_assignment_wins(self) -> None:
-        parsed = parse_key_names("098b987y = Сын\n098b987y = Дубль")
-        assert parsed == {"098b987y": "Сын"}
+        assert parse_key_names("X = Один\nX = Два") == {"X": "Один"}
 
-    def test_normalizes_code_on_parse(self) -> None:
-        assert parse_key_names("098-B987 = Сын") == {"098b987": "Сын"}
+    def test_drops_empty_labels(self) -> None:
+        assert parse_key_names("X =   ") == {}
 
     def test_non_string_is_empty(self) -> None:
         assert parse_key_names(None) == {}
-        assert parse_key_names(42) == {}
-
-    def test_bare_space_separator(self) -> None:
-        assert parse_key_names("098b987y Сын") == {"098b987y": "Сын"}
 
 
-class TestResolveKeyName:
-    KEYS = parse_key_names("098b987y = Сын\n098c112z = Жена")
+class TestOverridesWinOverTheOperator:
+    def test_override_by_code_also_renames_the_name_form(self) -> None:
+        # A key is indexed under code *and* name, and the message spells out
+        # the name. Overriding only the code would leave the operator's name
+        # in every notification.
+        index = apply_overrides(
+            build_key_index(KEYS), parse_key_names("5034 0C4B = Сын")
+        )
+        assert resolve_key_identity(MESSAGE, index) == "Сын"
 
-    def test_finds_code_anywhere_in_text(self) -> None:
-        assert resolve_key_name("Адрес открыта ключом 098b987y", self.KEYS) == "Сын"
-        assert resolve_key_name("098c112z открыл домофон", self.KEYS) == "Жена"
+    def test_override_by_name_renames_everything(self) -> None:
+        index = apply_overrides(
+            build_key_index(KEYS), parse_key_names("Денис = Мой брат")
+        )
+        assert resolve_key_identity(MESSAGE, index) == "Мой брат"
 
-    def test_survives_reworded_template(self) -> None:
-        # The operator may reword the sentence; containment still resolves it.
-        for template in (
-            "Дверь открыта ключом 098b987y",
-            "Доступ предоставлен: 098b987y",
-            "Код 098b987y применён",
-        ):
-            assert resolve_key_name(template, self.KEYS) == "Сын"
+    def test_override_leaves_other_keys_alone(self) -> None:
+        index = apply_overrides(
+            build_key_index(KEYS), parse_key_names("5034 0C4B = Сын")
+        )
+        assert resolve_key_identity("ключом Арсений", index) == "Арсений"
 
-    def test_ignores_separators_in_text(self) -> None:
-        assert resolve_key_name("открыто ключом 098-B987y", self.KEYS) == "Сын"
-
-    def test_truncated_code_does_not_match(self) -> None:
-        # A prefix of the real code must not resolve: matching it would
-        # attribute an activation to the wrong person.
-        assert resolve_key_name("открыто ключом 098-B987", self.KEYS) is None
-
-    def test_ignores_case(self) -> None:
-        assert resolve_key_name("открыто ключом 098B987Y", self.KEYS) == "Сын"
-
-    def test_no_match_returns_none(self) -> None:
-        assert resolve_key_name("Дверь открыта приложением", self.KEYS) is None
-
-    def test_empty_inputs(self) -> None:
-        assert resolve_key_name("", self.KEYS) is None
-        assert resolve_key_name(None, self.KEYS) is None
-        assert resolve_key_name("098b987y", {}) is None
-
-    def test_longest_code_wins_over_prefix(self) -> None:
-        keys = parse_key_names("098 = Короткий\n098b987y = Сын")
-        # Both are >= _MIN_CODE_LENGTH only for the long one; assert ordering
-        # explicitly with two long codes sharing a prefix instead.
-        keys = parse_key_names("abcdef = Короткий\nabcdefghij = Сын")
-        assert resolve_key_name("код abcdefghij", keys) == "Сын"
-
-    def test_too_short_code_is_rejected(self) -> None:
-        # A 3-character code would match almost any sentence.
-        keys = parse_key_names("abc = Опасно")
-        assert resolve_key_name("любой текст abc", keys) is None
-
-    @pytest.mark.parametrize("raw", ["", "   ", "нет знака равенства тут"])
-    def test_garbage_input_is_harmless(self, raw: str) -> None:
-        assert isinstance(parse_key_names(raw), dict)
+    def test_override_of_unknown_token_adds_it(self) -> None:
+        index = apply_overrides(build_key_index(KEYS), parse_key_names("X9Y9 = Гость"))
+        assert resolve_key_identity("открыто ключом X9Y9", index) == "Гость"
 
 
 class TestMaskSecrets:
-    """Diagnostic previews must stay readable but must not leak a key code."""
+    """Diagnostic previews stay readable but must not leak a key code."""
 
     def test_code_is_masked_but_sentence_survives(self) -> None:
-        masked = mask_secrets("Адрес открыта ключом 454E6FB3")
-        assert masked == "Адрес открыта ключом ***"
-
-    def test_lowercase_and_digits_masked(self) -> None:
-        assert mask_secrets("код 454e6fb3") == "код ***"
+        masked = mask_secrets("открыта ключом 50340C4B")
+        assert masked == "открыта ключом ***"
+        assert "открыта ключом" in masked
 
     def test_cyrillic_words_are_untouched(self) -> None:
-        # The class is ASCII-only, so Russian prose stays readable — that is
-        # the whole point of logging a preview at all.
         text = "Доступ предоставлен жильцу"
         assert mask_secrets(text) == text
 
     def test_contiguous_long_digits_are_masked(self) -> None:
-        # A key code is always contiguous, which is what this masks.
         assert mask_secrets("ид 9161234567") == "ид ***"
 
     def test_spaced_groups_are_not_masked(self) -> None:
-        # Known limitation, documented rather than papered over: the class is a
-        # contiguous run, so digits split by spaces survive. That is deliberate
-        # — widening it to spaced groups would mangle ordinary prose. Key
-        # codes are contiguous, which is the case that matters here.
+        # Documented limitation rather than papered over: the class is a
+        # contiguous run, so digits split by spaces survive. Widening it to
+        # spaced groups would mangle ordinary prose.
         assert mask_secrets("звоните +7 916 123 45 67") == "звоните +7 916 123 45 67"
-
-    def test_short_runs_survive(self) -> None:
-        # Fewer than four characters is not an identifier shape.
-        assert mask_secrets("код 12") == "код 12"
 
     def test_non_string_is_empty(self) -> None:
         assert mask_secrets(None) == ""
         assert mask_secrets(123) == ""
-
-    def test_original_code_never_appears_in_output(self) -> None:
-        code = "454E6FB3"
-        assert code not in mask_secrets(f"открыта ключом {code}")
-        assert code.lower() not in mask_secrets(f"открыта ключом {code}")

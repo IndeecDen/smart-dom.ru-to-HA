@@ -70,7 +70,7 @@ async def run_poll(events, options=None, watermark=None):
         FakeCoordinator(events, options),
         watermark if watermark is not None else HistoryWatermark(),
         emitted.append,
-        key_names=lambda: parse_key_names((options or {}).get("key_names")),
+        key_index=lambda: parse_key_names((options or {}).get("key_names")),
     )
     await poller.async_poll()
     return emitted
@@ -144,7 +144,7 @@ class TestPollPath:
             ),
             HistoryWatermark({STREAM: ["seed"]}),
             emitted.append,
-            key_names=lambda: parse_key_names(KEY_NAMES),
+            key_index=lambda: parse_key_names(KEY_NAMES),
         )
         await poller.async_poll()
         assert emitted[0]["event_type"] == "call_accepted"

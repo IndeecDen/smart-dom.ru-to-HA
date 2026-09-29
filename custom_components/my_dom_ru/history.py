@@ -15,7 +15,13 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
 from .const import CONF_KEY_NAMES, DOMAIN, EVENT_KEY_ACTIVATED, LOGGER
-from .access_keys import mask_secrets, parse_key_names, resolve_key_name
+from .access_keys import (
+    apply_overrides,
+    build_key_index,
+    mask_secrets,
+    parse_key_names,
+    resolve_key_identity,
+)
 
 
 _GENERAL_EVENT_TYPES = {
@@ -38,7 +44,7 @@ SIGNAL_HISTORY_EVENT = f"{DOMAIN}_history_event"
 
 
 def _no_key_names() -> Mapping[str, str]:
-    """Default when an entry has no access-key labels configured."""
+    """Default when no access-key names could be loaded at all."""
     return {}
 
 
@@ -139,13 +145,13 @@ class HistoryPoller:
         emit: Callable[[dict[str, Any]], None],
         *,
         camera_enabled: Callable[[str], bool] | None = None,
-        key_names: Callable[[], Mapping[str, str]] | None = None,
+        key_index: Callable[[], Mapping[str, str]] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._watermark = watermark
         self._emit = emit
         self._camera_enabled = camera_enabled or (lambda _camera_id: False)
-        self._key_names = key_names or _no_key_names
+        self._key_index = key_index or _no_key_names
 
     async def async_poll(self) -> bool:
         """Poll page zero and emit unseen whitelisted events chronologically."""
@@ -213,7 +219,9 @@ class HistoryPoller:
                         # That is how accessKeyActivated stayed invisible
                         # forever in 0.1.0.
                         unmapped.add(event.event_type)
-                    key_name = resolve_key_name(event.message, self._key_names())
+                    key_name = resolve_key_identity(
+                        event.message, self._key_index()
+                    )
                     if key_name is not None and (
                         now - datetime.fromtimestamp(event.timestamp, UTC)
                         > _KEY_LOOKBACK
@@ -376,6 +384,7 @@ class HistoryManager:
         self._poller: HistoryPoller | None = None
         self._unsub_interval: CALLBACK_TYPE | None = None
         self._poll_lock = asyncio.Lock()
+        self._key_index: dict[str, str] = {}
 
     async def async_start(self) -> None:
         """Restore opaque IDs, establish a baseline, then schedule polling."""
@@ -396,7 +405,7 @@ class HistoryManager:
                 payload,
             ),
             camera_enabled=self._camera_enabled,
-            key_names=self._key_names,
+            key_index=self._key_index,
         )
         await self.async_poll()
         self._unsub_interval = async_track_time_interval(
@@ -406,15 +415,17 @@ class HistoryManager:
         )
 
     @callback
-    def _key_names(self) -> Mapping[str, str]:
-        """Return the entry's configured code → label mapping.
+    def _key_index(self) -> Mapping[str, str]:
+        """Return code/name → label, with the user's overrides applied.
 
-        Read from the coordinator's options snapshot on every poll rather than
-        captured once, so a label edit takes effect without a restart of the
-        poller itself.
+        The operator's own names come from the cloud; the options text is
+        read on every poll rather than captured once, so a label edit takes
+        effect without restarting the poller.
         """
         options = getattr(self._coordinator, "entry_options_snapshot", None) or {}
-        return parse_key_names(options.get(CONF_KEY_NAMES))
+        return apply_overrides(
+            self._key_index, parse_key_names(options.get(CONF_KEY_NAMES))
+        )
 
     @callback
     def _camera_enabled(self, camera_id: str) -> bool:
@@ -442,12 +453,30 @@ class HistoryManager:
             LOGGER.debug("History poll skipped: previous poll still running")
             return False
         async with self._poll_lock:
+            await self._async_refresh_key_index()
             success = await self._poller.async_poll()
             if success:
                 await self._store.async_save(
                     {"streams": self._watermark.as_dict()}
                 )
             return success
+
+    async def _async_refresh_key_index(self) -> None:
+        """Reload the access-key names the operator holds for this place.
+
+        The push channel judges a door opening against its own warm copy; this
+        is the durable path's copy. A failure keeps the previous index rather
+        than clearing it, so a transient 5xx does not make every later event
+        anonymous.
+        """
+        for subscriber_place in (self._coordinator.data or {}).get("places") or []:
+            place_id = (subscriber_place.get("place") or {}).get("id")
+            if place_id is None:
+                continue
+            keys = await self._coordinator.api.query_access_keys(place_id)
+            if keys:
+                self._key_index = build_key_index(keys)
+            return
 
     async def _async_interval(self, _now: datetime) -> None:
         """Handle one HA interval callback."""

@@ -205,7 +205,7 @@ async def async_setup_entry(
 
     # Build the optional realtime listener now so SIP can read its token later,
     # but do not claim/start FCM until all fallible setup awaits have completed.
-    fcm_listener = DoorbellFcmListener(hass, entry, coordinator.api)
+    fcm_listener = DoorbellFcmListener(hass, entry, coordinator.api, coordinator)
 
     # Two-way audio: контроллер приёма вызова (REGISTER-on-ring). Трекает
     # активный FCM-вызов (SIGNAL_DOORBELL) и драйвит SipManager по сервису
