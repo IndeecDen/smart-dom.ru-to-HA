@@ -31,7 +31,6 @@ from .const import (
     CONF_ACCOUNT_ID,
     CONF_SUBSCRIBER_ID,
     CONF_USER_AGENT,
-    CONF_KEY_NAMES,
     # --- go2rtc ---
     CONF_USE_GO2RTC,
     CONF_GO2RTC_BASE_URL,
@@ -548,10 +547,6 @@ class MyDomRuOptionsFlowHandler(OptionsFlow):
                 DEFAULT_GO2RTC_KEEP_WARM_HIDDEN,
             ),
         )
-        key_names_default = self.entry.options.get(
-            CONF_KEY_NAMES, self.entry.data.get(CONF_KEY_NAMES, "")
-        )
-
         # NB: username/password — vol.Optional WITHOUT default. voluptuous
         # default would be back-filled into empty submit (HA frontend омит
         # пустые Optional поля) → юзер не мог бы очистить creds. Текущие
@@ -569,16 +564,11 @@ class MyDomRuOptionsFlowHandler(OptionsFlow):
                 CONF_GO2RTC_KEEP_WARM_HIDDEN,
                 default=bool(keep_warm_hidden_default),
             ): bool,
-            # No default, for the same reason as username/password below: a
-            # voluptuous default would be back-filled on an empty submit and
-            # the user could not clear the mapping.
-            vol.Optional(CONF_KEY_NAMES): str,
         })
 
         suggested_values = {
             CONF_GO2RTC_USERNAME: str(go2rtc_username_default or ""),
             CONF_GO2RTC_PASSWORD: str(go2rtc_password_default or ""),
-            CONF_KEY_NAMES: str(key_names_default or ""),
         }
 
         return self.async_show_form(

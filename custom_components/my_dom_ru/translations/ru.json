@@ -122,8 +122,7 @@
           "go2rtc_username": "Имя пользователя go2rtc",
           "go2rtc_password": "Пароль go2rtc",
           "go2rtc_keep_warm": "Публиковать включённые камеры для внешнего RTSP",
-          "go2rtc_keep_warm_hidden": "Также публиковать скрытые камеры",
-          "key_names": "Имена ключей (по одному КОД = Имя в строке)"
+          "go2rtc_keep_warm_hidden": "Также публиковать скрытые камеры"
         }
       }
     },

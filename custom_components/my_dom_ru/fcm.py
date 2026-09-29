@@ -33,17 +33,14 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from .access_keys import (
-    apply_overrides,
     build_key_index,
     describe_key_payload,
     mask_secrets,
-    parse_key_names,
     resolve_key_identity,
 )
 from .api import MyDomRuAPI
 from .const import (
     CONF_FCM_CREDENTIALS,
-    CONF_KEY_NAMES,
     DOMAIN,
     EVENT_KEY_ACTIVATED,
     FCM_API_KEY,
@@ -617,16 +614,13 @@ class DoorbellFcmListener:
             return
 
     def _resolve_key_name(self, message: Any) -> str | None:
-        """Resolve a key name from a message, overrides first.
+        """Resolve a key name from a message.
 
-        The user's own labels win over the operator's names, so a key the
-        cloud names badly can be relabelled without touching the phone.
+        Names come from the operator: they are the same ones the phone app
+        shows, so a key renamed in the app is renamed here too, and there is
+        nothing to configure.
         """
-        index = apply_overrides(
-            self._key_index,
-            parse_key_names((self._entry.options or {}).get(CONF_KEY_NAMES)),
-        )
-        return resolve_key_identity(message, index)
+        return resolve_key_identity(message, self._key_index)
 
     def _async_handle_place_event(self, data: dict[str, Any]) -> bool:
         """Dispatch an `accessKeyActivated` push, if this is one.

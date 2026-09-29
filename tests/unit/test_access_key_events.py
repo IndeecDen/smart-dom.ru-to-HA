@@ -1,4 +1,9 @@
-"""Access-key events: label resolution in the poll path and entity dedup."""
+"""Access-key events: name resolution in the durable poll path.
+
+Names come from the operator's `list_access_keys`, not from a setting — see
+`test_no_key_label_option.py` for why the option was removed. Here the index
+is supplied directly, which is what `HistoryManager` does at runtime.
+"""
 from __future__ import annotations
 
 import sys
@@ -10,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
-from my_dom_ru.access_keys import parse_key_names  # noqa: E402
+from my_dom_ru.access_keys import build_key_index  # noqa: E402
 from my_dom_ru.api import HistoryEvent, HistoryPage  # noqa: E402
 from my_dom_ru.history import (  # noqa: E402
     HistoryPoller,
@@ -18,15 +23,23 @@ from my_dom_ru.history import (  # noqa: E402
     map_general_event_type,
 )
 
-KEY_NAMES = "098b987y = Сын\n098c112z = Жена"
-STREAM = "general:55:accessControl:101"
+CODE = "098b987y"
+
+# What the operator's list_access_keys yields for this account.
+OPERATOR_KEYS = [
+    {"id": 1, "placeId": 55,
+     "accessKey": {"accessKeyCode": "098b987y", "name": "Сын"}},
+    {"id": 2, "placeId": 55,
+     "accessKey": {"accessKeyCode": "098c112z", "name": "Жена"}},
+]
+INDEX = build_key_index(OPERATOR_KEYS)
 
 
 def make_event(
     *,
     event_type: str = "accessKeyActivated",
     event_id: str = "e1",
-    message: str = "Адрес открыта ключom 098b987y",
+    message: str = f"Адрес открыта ключом {CODE}",
     source_type: str = "accessControl",
     source_id: str = "101",
 ) -> HistoryEvent:
@@ -57,34 +70,45 @@ class FakeApi:
 
 
 class FakeCoordinator:
-    def __init__(self, events: list[HistoryEvent], options: dict | None = None):
+    def __init__(self, events: list[HistoryEvent]):
         self.data = {"places": [{"place": {"id": 55}}], "cameras": []}
         self.api = FakeApi(events)
-        self.entry_options_snapshot = options or {}
 
 
-async def run_poll(events, options=None, watermark=None):
-    """Run one poll against a baseline and return the emitted payloads."""
+async def run_poll(events, *, index=INDEX, baseline=True):
+    """Run one poll and return the emitted payloads.
+
+    A stream with no prior watermark is a *silent baseline* and yields
+    nothing, so the seed is derived from the events themselves: hardcoding one
+    stream would quietly turn a `billingSystem` case into a no-op.
+    """
+    streams = (
+        {
+            f"general:{event.place_id}:{event.source_type}:{event.source_id}": [
+                "seed"
+            ]
+            for event in events
+        }
+        if baseline
+        else {}
+    )
     emitted: list[dict[str, Any]] = []
     poller = HistoryPoller(
-        FakeCoordinator(events, options),
-        watermark if watermark is not None else HistoryWatermark(),
+        FakeCoordinator(events),
+        HistoryWatermark(streams),
         emitted.append,
-        key_index=lambda: parse_key_names((options or {}).get("key_names")),
+        key_index=lambda: index,
     )
     await poller.async_poll()
     return emitted
 
 
-async def run_poll_after_baseline(events, options=None):
-    """Run a poll against a seeded watermark so events count as new."""
-    return await run_poll(events, options, HistoryWatermark({STREAM: ["seed"]}))
+async def run_after_baseline(events, *, index=INDEX):
+    return await run_poll(events, index=index)
 
 
 class TestMapGeneralEventType:
     def test_key_activation_is_whitelisted(self) -> None:
-        # Before this change accessKeyActivated arrived and was silently
-        # dropped, because only the two call types were mapped.
         assert map_general_event_type("accessKeyActivated") == "key_activated"
 
     def test_call_types_still_map(self) -> None:
@@ -92,60 +116,69 @@ class TestMapGeneralEventType:
         assert map_general_event_type("accessControlCallMissed") == "call_missed"
 
     def test_unknown_type_is_none(self) -> None:
-        assert map_general_event_type("billingNotification") is None
+        assert map_general_event_type("infoNotification") is None
 
 
 @pytest.mark.asyncio
 class TestPollPath:
     async def test_first_poll_is_a_silent_baseline(self) -> None:
         # Existing behaviour: no watermark stream means nothing is emitted, so
-        # enabling this does not replay the operator's whole history at once.
-        assert await run_poll([make_event()], {"key_names": KEY_NAMES}) == []
+        # a new install does not replay the operator's whole history at once.
+        assert await run_poll([make_event()], baseline=False) == []
 
-    async def test_emits_key_event_with_label(self) -> None:
-        emitted = await run_poll_after_baseline([make_event()], {"key_names": KEY_NAMES})
+    async def test_emits_key_event_with_operator_name(self) -> None:
+        emitted = await run_after_baseline([make_event()])
         assert len(emitted) == 1
         assert emitted[0]["event_type"] == "key_activated"
+        # Resolved from the cloud, not from any setting.
         assert emitted[0]["key_name"] == "Сын"
         assert emitted[0]["source_id"] == "101"
 
-    async def test_raw_message_is_not_propagated(self) -> None:
-        emitted = await run_poll_after_baseline(
-            [make_event(message="Адрес открыта ключом 098b987y")],
-            {"key_names": KEY_NAMES},
+    async def test_resolves_by_name_as_well_as_code(self) -> None:
+        # The verified live message says "открыта ключом Денис" with no code.
+        emitted = await run_after_baseline(
+            [make_event(message="открыта ключом Жена.")]
         )
+        assert emitted[0]["key_name"] == "Жена"
+
+    async def test_raw_message_is_not_propagated(self) -> None:
+        emitted = await run_after_baseline([make_event()])
         # The operator text carries the key code and must not reach entities,
         # the recorder or diagnostics.
         assert "message" not in emitted[0]
-        assert "098b987y" not in str(emitted[0])
+        assert CODE not in str(emitted[0])
 
-    async def test_unlabelled_key_emits_without_key_name(self) -> None:
-        emitted = await run_poll_after_baseline(
-            [make_event(message="Дверь открыта приложением")],
-            {"key_names": KEY_NAMES},
+    async def test_unmatched_key_emits_without_key_name(self) -> None:
+        emitted = await run_after_baseline(
+            [make_event(message="Дверь открыта приложением")]
         )
         assert len(emitted) == 1
         assert "key_name" not in emitted[0]
 
-    async def test_empty_mapping_still_emits_event(self) -> None:
-        emitted = await run_poll_after_baseline([make_event()], {})
-        # Users who do not label keys still get the activation, just anonymous.
+    async def test_empty_index_still_emits_event(self) -> None:
+        emitted = await run_after_baseline([make_event()], index={})
+        # A failed key lookup degrades the event to anonymous rather than
+        # dropping it.
         assert len(emitted) == 1
         assert "key_name" not in emitted[0]
 
     async def test_call_event_gets_no_key_attribute(self) -> None:
-        from my_dom_ru.access_keys import parse_key_names
-
-        emitted: list[dict[str, Any]] = []
-        poller = HistoryPoller(
-            FakeCoordinator(
-                [make_event(event_type="accessControlCallAccepted", message="")],
-                {"key_names": KEY_NAMES},
-            ),
-            HistoryWatermark({STREAM: ["seed"]}),
-            emitted.append,
-            key_index=lambda: parse_key_names(KEY_NAMES),
+        emitted = await run_after_baseline(
+            [make_event(event_type="accessControlCallAccepted", message="")]
         )
-        await poller.async_poll()
         assert emitted[0]["event_type"] == "call_accepted"
         assert "key_name" not in emitted[0]
+
+    async def test_content_key_event_is_flagged(self) -> None:
+        # The operator files these under billingSystem, so downstream needs to
+        # know the identity came from the text.
+        emitted = await run_after_baseline(
+            [make_event(event_type="infoNotification", source_type="billingSystem",
+                        source_id="18")]
+        )
+        assert emitted[0]["event_type"] == "key_activated"
+        assert emitted[0]["by_content"] is True
+
+    async def test_typed_key_event_is_not_flagged(self) -> None:
+        emitted = await run_after_baseline([make_event()])
+        assert emitted[0]["by_content"] is False

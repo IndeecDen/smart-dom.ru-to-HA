@@ -18,11 +18,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
 from my_dom_ru.access_keys import (  # noqa: E402
-    apply_overrides,
     build_key_index,
     mask_secrets,
     normalize_code,
-    parse_key_names,
     resolve_key_identity,
 )
 
@@ -132,53 +130,6 @@ class TestResolveKeyIdentity:
     def test_very_short_label_is_ignored(self) -> None:
         # "Я" would match almost any sentence.
         assert resolve_key_identity("открыто ключом Я", {"Я": "Я"}) is None
-
-
-class TestParseKeyNames:
-    def test_parses_equals_and_colon(self) -> None:
-        parsed = parse_key_names("5034 0C4B = Денис\n454E6FB3: Арсений")
-        assert parsed == {"5034 0C4B": "Денис", "454E6FB3": "Арсений"}
-
-    def test_ignores_comments_and_blank_lines(self) -> None:
-        assert parse_key_names("# ключи\n\n5034 0C4B = Денис\n  \n") == {
-            "5034 0C4B": "Денис"
-        }
-
-    def test_first_assignment_wins(self) -> None:
-        assert parse_key_names("X = Один\nX = Два") == {"X": "Один"}
-
-    def test_drops_empty_labels(self) -> None:
-        assert parse_key_names("X =   ") == {}
-
-    def test_non_string_is_empty(self) -> None:
-        assert parse_key_names(None) == {}
-
-
-class TestOverridesWinOverTheOperator:
-    def test_override_by_code_also_renames_the_name_form(self) -> None:
-        # A key is indexed under code *and* name, and the message spells out
-        # the name. Overriding only the code would leave the operator's name
-        # in every notification.
-        index = apply_overrides(
-            build_key_index(KEYS), parse_key_names("5034 0C4B = Сын")
-        )
-        assert resolve_key_identity(MESSAGE, index) == "Сын"
-
-    def test_override_by_name_renames_everything(self) -> None:
-        index = apply_overrides(
-            build_key_index(KEYS), parse_key_names("Денис = Мой брат")
-        )
-        assert resolve_key_identity(MESSAGE, index) == "Мой брат"
-
-    def test_override_leaves_other_keys_alone(self) -> None:
-        index = apply_overrides(
-            build_key_index(KEYS), parse_key_names("5034 0C4B = Сын")
-        )
-        assert resolve_key_identity("ключом Арсений", index) == "Арсений"
-
-    def test_override_of_unknown_token_adds_it(self) -> None:
-        index = apply_overrides(build_key_index(KEYS), parse_key_names("X9Y9 = Гость"))
-        assert resolve_key_identity("открыто ключом X9Y9", index) == "Гость"
 
 
 class TestMaskSecrets:

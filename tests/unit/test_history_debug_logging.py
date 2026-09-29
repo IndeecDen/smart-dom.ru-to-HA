@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"
 
 from my_dom_ru.api import HistoryEvent, HistoryPage  # noqa: E402
 from my_dom_ru.const import EVENT_KEY_ACTIVATED  # noqa: E402
+from my_dom_ru.access_keys import build_key_index
 from my_dom_ru.history import (  # noqa: E402
     HistoryPoller,
     HistoryWatermark,
@@ -104,9 +105,8 @@ def blob_of(records) -> str:
     return "\n".join(record.getMessage() for record in records())
 
 
-async def run(events, key_names=""):
-    from my_dom_ru.access_keys import parse_key_names
-
+async def run(events, with_keys: bool = True):
+    """Run a poll, optionally with the operator's key index loaded."""
     # Seed the stream each event actually belongs to. A stream with no prior
     # watermark is a *silent baseline* and yields nothing, so seeding the wrong
     # key would silently turn every "new event" case into a no-op.
@@ -114,12 +114,19 @@ async def run(events, key_names=""):
         f"general:{event.place_id}:{event.source_type}:{event.source_id}": ["seed"]
         for event in events
     }
+    index = (
+        build_key_index(
+            [{"id": 1, "accessKey": {"accessKeyCode": CODE, "name": "Денис"}}]
+        )
+        if with_keys
+        else {}
+    )
     emitted: list[dict[str, Any]] = []
     poller = HistoryPoller(
-        FakeCoordinator(events, key_names),
+        FakeCoordinator(events),
         HistoryWatermark(streams),
         emitted.append,
-        key_index=lambda: parse_key_names(key_names),
+        key_index=lambda: index,
     )
     await poller.async_poll()
     return emitted
@@ -128,7 +135,7 @@ async def run(events, key_names=""):
 class TestDebugLoggingDoesNotLeak:
     @pytest.mark.asyncio
     async def test_poller_logs_never_contain_the_code(self, records) -> None:
-        await run([key_event()], f"{CODE} = Денис")
+        await run([key_event()])
         assert records(), "expected diagnostic records"
         blob = blob_of(records)
         assert CODE not in blob
@@ -140,14 +147,14 @@ class TestDebugLoggingDoesNotLeak:
     async def test_unmatched_key_logs_the_reason(self, records) -> None:
         # NO_LABEL_MATCH tells the user the mapping failed, without saying
         # which code failed to match.
-        await run([key_event()], "OTHERCODE = Денис")
+        await run([key_event()], with_keys=False)
         blob = blob_of(records)
         assert "NO_LABEL_MATCH" in blob
         assert CODE not in blob
 
     @pytest.mark.asyncio
     async def test_matched_key_logs_the_label(self, records) -> None:
-        await run([key_event()], f"{CODE} = Денис")
+        await run([key_event()])
         blob = blob_of(records)
         assert "Денис" in blob
         assert CODE not in blob
@@ -174,7 +181,7 @@ class TestDebugLoggingDoesNotLeak:
         # Seeing a type we do not map is how a missing feature gets noticed.
         # Unmapped types are skipped before the watermark, so they no longer
         # produce a per-event line; they are summarised instead, once per poll.
-        await run([key_event(event_type="someNewType")])
+        await run([key_event(event_type="someNewType")], with_keys=False)
         blob = blob_of(records)
         assert "unmapped backend type" in blob
         assert "someNewType" in blob
@@ -183,7 +190,7 @@ class TestDebugLoggingDoesNotLeak:
 
     @pytest.mark.asyncio
     async def test_unmapped_summary_keeps_the_message_out(self, records) -> None:
-        await run([key_event(event_type="someNewType")], f"{CODE} = Денис")
+        await run([key_event(event_type="someNewType")], with_keys=False)
         blob = blob_of(records)
         assert CODE not in blob
         assert MESSAGE not in blob
@@ -198,7 +205,7 @@ class TestKeyDetectionIsBoundedInTime:
 
     @pytest.mark.asyncio
     async def test_recent_key_message_is_acted_on(self, records) -> None:
-        await run([key_event()], f"{CODE} = Денис")
+        await run([key_event()])
         assert "resolved=Денис" in blob_of(records)
 
     @pytest.mark.asyncio
@@ -206,7 +213,7 @@ class TestKeyDetectionIsBoundedInTime:
         stale = key_event(
             timestamp=now() - int(timedelta(minutes=45).total_seconds())
         )
-        await run([stale], f"{CODE} = Денис")
+        await run([stale])
         blob = blob_of(records)
         assert "Денис" not in blob
 
@@ -218,7 +225,7 @@ class TestKeyDetectionIsBoundedInTime:
             event_type="accessControlCallMissed",
             timestamp=now() - int(timedelta(hours=3).total_seconds()),
         )
-        emitted = await run([stale], f"{CODE} = Денис")
+        emitted = await run([stale])
         assert [item["event_type"] for item in emitted] == ["call_missed"]
 
 
@@ -230,7 +237,7 @@ class TestMappingUnchanged:
     async def test_unmapped_type_is_not_emitted(self) -> None:
         # The diagnostic must not change behaviour: an unknown type is logged
         # and still dropped.
-        assert await run([key_event(event_type="someNewType")]) == []
+        assert await run([key_event(event_type="someNewType")], with_keys=False) == []
 
 
 class TestUnmappedTypesAreNotBurned:

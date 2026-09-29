@@ -14,12 +14,10 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
-from .const import CONF_KEY_NAMES, DOMAIN, EVENT_KEY_ACTIVATED, LOGGER
+from .const import DOMAIN, EVENT_KEY_ACTIVATED, LOGGER
 from .access_keys import (
-    apply_overrides,
     build_key_index,
     mask_secrets,
-    parse_key_names,
     resolve_key_identity,
 )
 
@@ -412,26 +410,16 @@ class HistoryManager:
                 payload,
             ),
             camera_enabled=self._camera_enabled,
-            key_index=self._key_index,
+            # A lambda, not the dict: the poller calls this to read the
+            # current index. Passing `self._key_index` directly would shadow
+            # the attribute with a plain mapping and raise on call.
+            key_index=lambda: self._key_index,
         )
         await self.async_poll()
         self._unsub_interval = async_track_time_interval(
             self._hass,
             self._async_interval,
             HISTORY_POLL_INTERVAL,
-        )
-
-    @callback
-    def _key_index(self) -> Mapping[str, str]:
-        """Return code/name → label, with the user's overrides applied.
-
-        The operator's own names come from the cloud; the options text is
-        read on every poll rather than captured once, so a label edit takes
-        effect without restarting the poller.
-        """
-        options = getattr(self._coordinator, "entry_options_snapshot", None) or {}
-        return apply_overrides(
-            self._key_index, parse_key_names(options.get(CONF_KEY_NAMES))
         )
 
     @callback

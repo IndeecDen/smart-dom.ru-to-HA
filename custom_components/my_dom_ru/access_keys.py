@@ -78,63 +78,6 @@ def _label_pattern(label: str) -> re.Pattern[str] | None:
     )
 
 
-def parse_key_names(raw: Any) -> dict[str, str]:
-    """Parse the options text into a label mapping.
-
-    Accepted line forms, one per line::
-
-        5034 0C4B = Денис
-        454E6FB3: Арсений
-        21E4C23F Ключ №1
-
-    Blank lines and `#` comments are ignored. The first assignment of a code
-    wins, so a duplicated line cannot silently shadow an earlier label.
-
-    This is an override for keys the operator names badly or not at all; the
-    names from `list_access_keys` are used when it is empty.
-
-    Args:
-        raw: The options string as typed by the user.
-
-    Returns:
-        Mapping of raw code → label, with empty labels dropped.
-    """
-    if not isinstance(raw, str):
-        return {}
-    mapping: dict[str, str] = {}
-    for line in raw.splitlines():
-        text = line.strip()
-        if not text or text.startswith("#"):
-            continue
-        code, separator, label = _split_assignment(text)
-        if not separator:
-            continue
-        label = label.strip()
-        if code and label:
-            mapping.setdefault(code, label)
-    return mapping
-
-
-def _split_assignment(text: str) -> tuple[str, str, str]:
-    """Split one mapping line into code, separator and label.
-
-    `=` and `:` are explicit separators. A bare space separator is only
-    accepted when the first token holds word characters, so a code that is
-    itself space separated ("5034 0C4B = Денис" uses `=`, but a code printed
-    "12 45 67 Жена" without one) is not cut in half.
-    """
-    for separator in ("=", ":"):
-        if separator in text:
-            code, _, label = text.partition(separator)
-            # Only the outer whitespace goes: a code may legitimately contain
-            # a space, as the app prints it ("5034 0C4B = Денис").
-            return code.strip(), separator, label
-    parts = text.split(maxsplit=1)
-    if len(parts) == 2 and any(part.isalnum() for part in _NON_WORD.split(parts[0])):
-        return parts[0], " ", parts[1]
-    return text, "", ""
-
-
 def build_key_index(keys: Any) -> dict[str, str]:
     """Index the operator's access keys by every form they appear under.
 
@@ -206,40 +149,6 @@ def describe_key_payload(keys: Any) -> str:
     return f"{len(keys)} items, top={sorted(first)}, accessKey={inner}"
 
 
-def apply_overrides(
-    index: Mapping[str, str],
-    overrides: Mapping[str, str],
-) -> dict[str, str]:
-    """Return `index` with the user's labels applied to whole keys.
-
-    A key is indexed under both its code and its name, and the message may
-    contain either. Renaming therefore has to hit every form of the same key:
-    overriding `5034 0C4B` also renames the `Денис` form, or the user would
-    still get the operator's name for every notification that happens to
-    spell it out.
-
-    Args:
-        index: Output of :func:`build_key_index`.
-        overrides: Output of :func:`parse_key_names`.
-
-    Returns:
-        A new mapping; the inputs are not modified.
-    """
-    result = dict(index)
-    for token, label in overrides.items():
-        if not token or not label:
-            continue
-        # Whatever this token currently points at identifies the key; every
-        # other form bound to the same value is renamed alongside it.
-        affected = result.get(token)
-        result[token] = label
-        if affected and affected != label:
-            for other, value in list(result.items()):
-                if other != token and value == affected:
-                    result[other] = label
-    return result
-
-
 def resolve_key_identity(
     message: Any,
     index: Mapping[str, str],
@@ -251,7 +160,7 @@ def resolve_key_identity(
 
     Args:
         message: The server rendered event text, or `None`.
-        index: Output of :func:`build_key_index` or :func:`parse_key_names`.
+        index: Output of :func:`build_key_index`.
 
     Returns:
         The key's display name, or `None` when nothing matches.
