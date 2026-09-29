@@ -167,12 +167,13 @@ actions:
   - action: notify.telegram
     data:
       message: >-
-        {% if trigger.event.data.key_name is defined %}
-          {{ trigger.event.data.key_name }} открыл домофон
-        {% else %}
-          Кто-то открыл домофон ключом
-        {% endif %}
+        {% set who = trigger.to_state.attributes.get('key_name') %}
+        {{ who ~ ' открыл домофон' if who else 'Кто-то открыл домофон ключом' }}
 ```
+
+Атрибуты читаются через `trigger.to_state.attributes`, а не `trigger.event.data`:
+у триггера `state` в шаблон попадают `from_state`, `to_state`, `for` и
+`attribute` — объекта `event` среди них нет.
 
 Если сопоставление не заполнено, HA покажет «Дверь открыта ключом …» в истории
 приложения, но `key_name` будет пустым. Проверить можно автоматизацией или
