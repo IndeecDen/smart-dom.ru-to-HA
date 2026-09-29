@@ -159,12 +159,23 @@ class TestDebugLoggingDoesNotLeak:
         assert "accessKeyActivated" in blob
 
     @pytest.mark.asyncio
-    async def test_unmapped_backend_type_is_still_logged(self, records) -> None:
+    async def test_unmapped_backend_type_is_still_surfaced(self, records) -> None:
         # Seeing a type we do not map is how a missing feature gets noticed.
+        # Unmapped types are skipped before the watermark, so they no longer
+        # produce a per-event line; they are summarised instead, once per poll.
         await run([key_event(event_type="someNewType")])
         blob = blob_of(records)
+        assert "unmapped backend type" in blob
         assert "someNewType" in blob
-        assert "mapped=-" in blob
+        # Still no per-event record for something we do not act on.
+        assert "History event" not in blob
+
+    @pytest.mark.asyncio
+    async def test_unmapped_summary_keeps_the_message_out(self, records) -> None:
+        await run([key_event(event_type="someNewType")], f"{CODE} = Денис")
+        blob = blob_of(records)
+        assert CODE not in blob
+        assert MESSAGE not in blob
 
 
 class TestMappingUnchanged:
@@ -176,3 +187,67 @@ class TestMappingUnchanged:
         # The diagnostic must not change behaviour: an unknown type is logged
         # and still dropped.
         assert await run([key_event(event_type="someNewType")]) == []
+
+
+class TestUnmappedTypesAreNotBurned:
+    """Regression: an unmapped type must not be recorded as already seen.
+
+    0.1.0 ingested every event id into the watermark and *then* dropped the
+    types it did not map. `accessKeyActivated` had no mapping, so its id was
+    remembered and the event discarded — permanently, since a later poll saw
+    an already-seen id. Adding the mapping afterwards could never surface it,
+    which is exactly why a real key opening never appeared in Home Assistant.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unmapped_event_stays_new_across_polls(self) -> None:
+        event = key_event(event_type="someNewType")
+        # Seeded so the first poll has a baseline, mirroring a running system.
+        watermark = HistoryWatermark({"general:55:accessControl:101": ["seed"]})
+
+        poller = HistoryPoller(
+            FakeCoordinator([event]),
+            watermark,
+            lambda payload: None,
+        )
+        await poller.async_poll()
+        # The id must not have been remembered.
+        assert "e1" not in watermark._seen["general:55:accessControl:101"]
+
+    @pytest.mark.asyncio
+    async def test_newly_mapped_type_surfaces_its_history(self) -> None:
+        # Simulates the upgrade path: the id was never burned, so once a
+        # mapping exists the event is treated as new and emitted.
+        event = key_event(event_type="accessKeyActivated")
+        watermark = HistoryWatermark({"general:55:accessControl:101": ["seed"]})
+        emitted: list[dict[str, Any]] = []
+
+        poller = HistoryPoller(
+            FakeCoordinator([event]),
+            watermark,
+            emitted.append,
+        )
+        await poller.async_poll()
+        assert [item["event_type"] for item in emitted] == ["key_activated"]
+
+    @pytest.mark.asyncio
+    async def test_mapped_type_is_still_deduplicated(self) -> None:
+        # The fix must not turn every poll into a replay.
+        event = key_event()
+        emitted: list[dict[str, Any]] = []
+        coordinator = FakeCoordinator([event])
+
+        first = HistoryPoller(
+            coordinator,
+            HistoryWatermark({"general:55:accessControl:101": ["seed"]}),
+            emitted.append,
+        )
+        await first.async_poll()
+
+        second = HistoryPoller(
+            coordinator,
+            first._watermark,
+            emitted.append,
+        )
+        await second.async_poll()
+        assert len(emitted) == 1

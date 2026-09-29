@@ -172,9 +172,25 @@ class HistoryPoller:
                     page.last,
                 )
                 by_source: dict[str, list[str]] = {}
+                unmapped: set[str] = set()
                 for event in page.events:
+                    if map_general_event_type(event.event_type) is None:
+                        # Not recorded in the watermark. Recording first and
+                        # filtering later burns the id permanently: the event
+                        # is remembered as "already seen" and dropped, so if
+                        # the mapping is ever added it can no longer surface.
+                        # That is how accessKeyActivated stayed invisible
+                        # forever in 0.1.0.
+                        unmapped.add(event.event_type)
+                        continue
                     stream = _general_stream_key(event)
                     by_source.setdefault(stream, []).append(event.id)
+                if unmapped:
+                    LOGGER.debug(
+                        "History poll saw %d unmapped backend type(s): %s",
+                        len(unmapped),
+                        ", ".join(sorted(unmapped)),
+                    )
                 new_events = {
                     (stream, event_id)
                     for stream, event_ids in by_source.items()
