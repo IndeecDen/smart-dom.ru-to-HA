@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -170,6 +171,20 @@ class HistoryPoller:
                     "History poll ok: %d events, last=%s",
                     len(page.events),
                     page.last,
+                )
+                # Type histogram for the page. Needed to tell "the backend
+                # does not return this type at all" apart from "it is on the
+                # page but suppressed as already seen" — the second case is
+                # invisible, because suppression is exactly what a mapped,
+                # already-watermarked event looks like.
+                counts: Counter[str] = Counter(
+                    event.event_type for event in page.events
+                )
+                LOGGER.debug(
+                    "History page types: %s",
+                    ", ".join(
+                        f"{name}={count}" for name, count in counts.most_common()
+                    ),
                 )
                 by_source: dict[str, list[str]] = {}
                 unmapped: set[str] = set()
