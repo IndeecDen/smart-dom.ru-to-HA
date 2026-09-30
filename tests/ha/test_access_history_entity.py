@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from typing import Any
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
 from homeassistant.core import HomeAssistant  # noqa: E402
@@ -316,3 +318,107 @@ class TestIntercomClaimsContentKeyEvent:
             payload(source_type="billingSystem", source_id="18", by_content=True)
         )
         assert fired == []
+
+
+@pytest.mark.asyncio
+class TestSoleIntercomIsComputedFromApiTypes:
+    """The wiring that decides whether a door may claim a key event.
+
+    `async_setup_entry` counts distinct access controls per place to derive
+    `sole_intercom`. Both ids arrive from the JSON API as *numbers*, and the
+    counting map used to keep them raw while the lookup went through `str()`,
+    so the lookup never matched and `sole_intercom` was silently `False` on
+    every install. The intercom entity then stayed mute for key openings even
+    on an account with exactly one door — while its own tests, which pass
+    `sole_intercom` directly, were all green.
+    """
+
+    LOCKS_ONE = [
+        {
+            "place_id": 55,
+            "access_control_id": 101,
+            "name": "Домофон",
+            "entrance_id": None,
+        }
+    ]
+    LOCKS_TWO = [
+        {
+            "place_id": 55,
+            "access_control_id": 101,
+            "name": "Первый",
+            "entrance_id": 1,
+        },
+        {
+            "place_id": 55,
+            "access_control_id": 202,
+            "name": "Второй",
+            "entrance_id": 2,
+        },
+    ]
+
+    async def collect(self, locks: list[dict]) -> list:
+        from unittest.mock import patch
+
+        from my_dom_ru.const import CONF_ACCOUNT_ID, CONF_SUBSCRIBER_ID
+        from my_dom_ru.event import async_setup_entry
+
+        coordinator = MagicMock(spec=MyDomRuUpdateCoordinator)
+        coordinator.data = {"locks": locks, "cameras": []}
+        entry = MagicMock()
+        entry.entry_id = "entry-1"
+        entry.runtime_data = coordinator
+        entry.data = {
+            CONF_ACCOUNT_ID: "482631118701",
+            CONF_SUBSCRIBER_ID: "6095505",
+        }
+
+        added: list = []
+        with (
+            patch("my_dom_ru.event.place_device_id", return_value=None),
+            patch("my_dom_ru.event._migrate_single_place_account_history_entity"),
+        ):
+            await async_setup_entry(
+                MagicMock(spec=HomeAssistant), entry, added.extend
+            )
+        return added
+
+    async def test_single_intercom_with_numeric_ids_may_claim(self) -> None:
+        added = await self.collect(self.LOCKS_ONE)
+        access = [
+            entity
+            for entity in added
+            if isinstance(entity, MyDomRuAccessHistoryEvent)
+        ]
+        assert len(access) == 1
+        assert access[0]._sole_intercom is True
+
+    async def test_two_intercoms_may_not_claim(self) -> None:
+        added = await self.collect(self.LOCKS_TWO)
+        access = [
+            entity
+            for entity in added
+            if isinstance(entity, MyDomRuAccessHistoryEvent)
+        ]
+        assert len(access) == 2
+        assert all(entity._sole_intercom is False for entity in access)
+
+    async def test_the_wired_entity_reports_the_opening(self) -> None:
+        # End of the chain: the entity built by setup, fed the payload the push
+        # actually delivers, must fire rather than drop it.
+        added = await self.collect(self.LOCKS_ONE)
+        entity = next(
+            entity
+            for entity in added
+            if isinstance(entity, MyDomRuAccessHistoryEvent)
+        )
+        entity.hass = MagicMock(spec=HomeAssistant)
+        fired: list[tuple[str, dict]] = []
+        entity._trigger_event = lambda event_type, attrs: fired.append(
+            (event_type, attrs)
+        )
+        entity.async_write_ha_state = lambda: None
+        entity._emit(
+            payload(source_type="billingSystem", source_id="18", by_content=True)
+        )
+        assert len(fired) == 1
+        assert fired[0][0] == EVENT_KEY_ACTIVATED

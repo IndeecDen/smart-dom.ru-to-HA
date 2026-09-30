@@ -152,11 +152,19 @@ async def async_setup_entry(
     # Дедуп по (place_id, access_control_id) — одна event-сущность на домофон
     # (FCM-payload несёт AccessControlId, не entrance). При multi-entrance AC
     # берём lock с min entrance_id → стабильный intercom-device между рестартами.
+    # str(), always: both ids arrive from the JSON API as numbers, while every
+    # comparison downstream is against string fields of the payload. Keeping
+    # the raw values made `interlocks_per_place` below int-keyed and its
+    # `str(...)` lookup miss every time — which silently pinned
+    # `sole_intercom` to False and left the intercom entity mute for key
+    # events on an account that has exactly one intercom.
     by_ac: dict[tuple[str, str], dict] = {}
     for lk in locks:
-        key = (lk.get("place_id"), lk.get("access_control_id"))
-        if None in key:
+        raw_place_id = lk.get("place_id")
+        raw_ac_id = lk.get("access_control_id")
+        if raw_place_id is None or raw_ac_id is None:
             continue
+        key = (str(raw_place_id), str(raw_ac_id))
         cur = by_ac.get(key)
         if cur is None or str(lk.get("entrance_id") or "") < str(
             cur.get("entrance_id") or ""
@@ -228,6 +236,21 @@ async def async_setup_entry(
         for camera_info in (coordinator.data or {}).get("cameras") or []
         if camera_info.get("source") in ("intercom", "public")
     )
+    LOGGER.debug(
+        "Event setup: сущностей=%d, из них access=%d, account=%d",
+        len(entities),
+        len(by_ac),
+        sum(1 for e in entities if isinstance(e, MyDomRuPlaceHistoryEvent)),
+    )
+    for (raw_place_id, raw_ac_id), lock_info in by_ac.items():
+        LOGGER.debug(
+            "Lock: place_id=%r (%s) ac_id=%r (%s) sole=%s",
+            raw_place_id,
+            type(raw_place_id).__name__,
+            raw_ac_id,
+            type(raw_ac_id).__name__,
+            len(interlocks_per_place.get(str(lock_info["place_id"]), ())) == 1,
+        )
     async_add_entities(entities)
 
 
@@ -252,6 +275,11 @@ class _AccessEventEntity(CoordinatorEntity[MyDomRuUpdateCoordinator], EventEntit
     async def async_added_to_hass(self) -> None:
         """Subscribe to the durable poll and the realtime push."""
         await super().async_added_to_hass()
+        LOGGER.debug(
+            "Event %s: подписан на push (типы=%s)",
+            self.entity_id,
+            self._attr_event_types,
+        )
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass, self._history_signal, self._emit
@@ -264,14 +292,29 @@ class _AccessEventEntity(CoordinatorEntity[MyDomRuUpdateCoordinator], EventEntit
     @callback
     def _emit(self, payload: dict[str, Any]) -> None:
         """Fire one access event if it belongs here and has not been seen."""
+        event_id = str(payload.get("event_id") or "")
         if payload.get("event_type") not in self._attr_event_types:
+            LOGGER.debug(
+                "Event %s: тип %s не в списке",
+                self.entity_id,
+                payload.get("event_type"),
+            )
             return
         if not self._owns(payload):
+            LOGGER.debug(
+                "Event %s: не владеет payload place=%s source=%s by_content=%s",
+                self.entity_id,
+                payload.get("place_id"),
+                payload.get("source_type"),
+                payload.get("by_content"),
+            )
             return
 
-        event_id = str(payload.get("event_id") or "")
         if event_id:
             if event_id in self._recent_event_ids:
+                LOGGER.debug(
+                    "Event %s: дубликат %s", self.entity_id, event_id
+                )
                 return
             self._recent_event_ids[event_id] = None
             if len(self._recent_event_ids) > _RECENT_EVENT_ID_LIMIT:
@@ -279,6 +322,13 @@ class _AccessEventEntity(CoordinatorEntity[MyDomRuUpdateCoordinator], EventEntit
                     : _RECENT_EVENT_ID_LIMIT // 2
                 ]:
                     del self._recent_event_ids[stale]
+        LOGGER.debug(
+            "Event %s: СРАБОТАЛА, тип=%s key_name=%s id=%s",
+            self.entity_id,
+            payload["event_type"],
+            payload.get("key_name"),
+            event_id,
+        )
 
         attributes = {
             key: payload[key]
@@ -322,6 +372,12 @@ class MyDomRuPlaceHistoryEvent(_AccessEventEntity):
         # the payloads reaching `_owns` carry them as strings. Comparing the
         # two directly would never match, which silently killed this entity.
         self._place_id = str(place_id)
+        LOGGER.debug(
+            "Account history entity: id=%s place_id=%r unique=%s",
+            _place_history_entity_id(account_id, place_id),
+            self._place_id,
+            _place_history_unique_id(account_id, subscriber_id, place_id),
+        )
         self._history_signal = history_dispatch_signal
         self._sources = {
             (str(lock["place_id"]), str(lock["access_control_id"])): str(

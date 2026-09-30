@@ -163,8 +163,10 @@ cards:
 triggers:
   - trigger: state
     entity_id: event.moy_dom_doorofon_access
-    attribute: event_type
-    to: key_activated
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state.attributes.get('event_type') == 'key_activated' }}
 actions:
   - action: notify.telegram
     data:
@@ -174,16 +176,26 @@ actions:
         {{ who ~ ' открыл домофон' if who else 'Кто-то открыл домофон ключом' }}
 ```
 
-Две особенности шаблона, обе проверены рендерингом:
+Триггер смотрит на **любое** изменение сущности, а тип события проверяется
+условием. Так нужно, потому что у сущности события `state` — это время
+события, а `event_type` лежит в атрибутах. Триггер с
+`attribute: event_type` и `to: key_activated` кажется естественнее, но
+сработает только один раз: HA пропускает срабатывание, когда значение
+атрибута не изменилось, а два прохода подряд дают одно и то же значение
+`key_activated`. Первое уведомление придёт, второе — уже нет.
 
-- атрибуты читаются через `trigger.to_state.attributes`, а не
-  `trigger.event.data`: у триггера `state` в шаблон попадают `from_state`,
-  `to_state`, `for` и `attribute` — объекта `event` среди них нет;
+Три особенности шаблона, все проверены рендерингом:
+
+- условие смотрит `trigger.to_state.attributes`, а не `trigger.event.data`:
+  объекта `event` у триггера `state` нет вовсе;
 - проверка `trigger is defined and trigger.to_state is defined` нужна, чтобы
   шаблон не падал при ручном запуске. Кнопка «Run» у автоматизации
   подставляет `{"platform": None}`, а «Выполнить действие» в редакторе скрипта
   не подставляет `trigger` вовсе. Без проверки в обоих случаях будет
-  `UndefinedError`.
+  `UndefinedError`;
+- вызов сервиса уведомления зависит от вашей интеграции Telegram. Здесь
+  показан `notify.telegram`; для `telegram_mtproxy` это
+  `telegram_mtproxy.send_message` с `entity_id` целевого `notify`-объекта.
 
 Если оператор перестанет писать имя в текст, `key_name` станет пустым, а
 событие продолжит приходить анонимным. Признак виден в логе:
@@ -197,13 +209,19 @@ actions:
 triggers:
   - trigger: state
     entity_id: event.moy_dom_doorbell
-    to: "on"
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.to_state.attributes.get('event_type') == 'ring' }}
 actions:
   - action: notify.mobile_app_phone
     data:
       message: "Звонок в домофон"
   - action: my_dom_ru.answer
 ```
+
+Условие тоже обязательно: у сущности события `state` — это время события, а не
+`on`, поэтому триггер ловит любое изменение, а `ring` отсекается условием.
 
 Автоматическое открытие двери гостю по пропуску — по вашему усмотрению и
 возможностям домофона: интеграция даёт сущность `lock`, а правило открытия
@@ -221,7 +239,7 @@ logger:
     custom_components.my_dom_ru: debug
 ```
 
-Появится три вида записей:
+Появится четыре вида записей:
 
 - `History poll ok: N events` — поллер достучался до облака;
 - `History event … backend_type=accessKeyActivated source=<тип>:<id>` — событие
