@@ -22,7 +22,6 @@ from .const import (
     CONF_OPERATOR_ID,
     CONF_PHONE,
     CONF_SUBSCRIBER_ID,
-    DOMAIN,
 )
 
 # Источник правды по секретам — SENSITIVE_KEYS из _logging.py (ADR-0004).

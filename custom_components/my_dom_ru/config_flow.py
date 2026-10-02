@@ -3,7 +3,7 @@ import voluptuous as vol
 
 from collections.abc import Mapping
 
-from typing import Any, cast
+from typing import Any
 
 from homeassistant.data_entry_flow import SectionConfig, section
 from homeassistant.config_entries import (

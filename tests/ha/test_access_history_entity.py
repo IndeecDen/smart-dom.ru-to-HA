@@ -11,11 +11,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
 from homeassistant.core import HomeAssistant  # noqa: E402
-from homeassistant.helpers.entity_platform import AddEntitiesCallback  # noqa: E402
 
 from my_dom_ru.const import EVENT_KEY_ACTIVATED  # noqa: E402
 from my_dom_ru.coordinator import (  # noqa: E402
-    MyDomRuConfigEntry,
     MyDomRuUpdateCoordinator,
 )
 from my_dom_ru.event import (  # noqa: E402

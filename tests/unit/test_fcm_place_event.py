@@ -10,7 +10,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "custom_components"))
 
-from my_dom_ru.access_keys import resolve_key_identity  # noqa: E402
 from my_dom_ru.fcm import parse_place_event  # noqa: E402
 
 
