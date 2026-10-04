@@ -1276,7 +1276,7 @@ declare global {
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "mdr-intercom-call-card",
-  name: "EG Intercom — Call screen / ЭГ Домофон — Экран вызова",
+  name: "Умный Дом.ру — Вызов домофона",
   description:
     "Doorbell incoming call & talk: video+audio, open door, accept/hang up, mic — one card for all intercoms. "
     + "Входящий вызов и разговор с домофоном: видео+звук, открыть дверь, принять/завершить, микрофон.",

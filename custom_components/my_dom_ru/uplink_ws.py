@@ -17,6 +17,7 @@ HA-WebSocket, что и весь UI (без go2rtc/TURN, 4G-friendly). Кома�
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -26,6 +27,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN, LOGGER, SIP_DATA as _SIP_DATA
+from .lovelace import async_register_card_resources
 
 # Дефолтный sample_rate микрофона браузера (AudioContext по умолчанию 48кГц).
 # UplinkSink ресемплит к 8кГц G.711 — точное значение важно для качества.
@@ -114,22 +116,21 @@ def async_register_uplink_ws_command(hass: HomeAssistant) -> None:
     hass.data[_WS_REGISTERED] = True
 
 
-# Lovelace-карты (микрофон, экран вызова, история) раздаются статикой из всей www/;
-# пользователь добавляет URL как ресурс (Settings → Dashboards → Resources →
-# JavaScript Module). Регистрируем директорию, а не отдельный файл, — чтобы
-# отдавались все карты (mic-card + call-card + будущие) без правок кода.
+# Раздаём всю www/ и автоматически подключаем модули карточек к Lovelace.
 STATIC_BASE = "/my_dom_ru_static"
 _WWW_DIR = os.path.join(os.path.dirname(__file__), "www")
 CARD_URL = f"{STATIC_BASE}/mdr-intercom-mic-card.js"  # mic-card (обратная совместимость)
 CALL_CARD_URL = f"{STATIC_BASE}/mdr-intercom-call-card.js"  # call + history bundle
 _CARD_REGISTERED = f"{DOMAIN}_uplink_card_registered"
+_CARD_LOCK = f"{DOMAIN}_uplink_card_lock"
 
 
 async def async_register_uplink_card(hass: HomeAssistant) -> None:
-    """Раздать www/ статикой: mic, call-screen и history cards."""
-    if hass.data.get(_CARD_REGISTERED):
-        return
-    await hass.http.async_register_static_paths(
-        [StaticPathConfig(STATIC_BASE, _WWW_DIR, False)]
-    )
-    hass.data[_CARD_REGISTERED] = True
+    """Раздать www/ и подключить mic, call-screen и history cards."""
+    async with hass.data.setdefault(_CARD_LOCK, asyncio.Lock()):
+        if not hass.data.get(_CARD_REGISTERED):
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig(STATIC_BASE, _WWW_DIR, False)]
+            )
+            hass.data[_CARD_REGISTERED] = True
+        await async_register_card_resources(hass, (CALL_CARD_URL, CARD_URL))

@@ -28,6 +28,16 @@ interface HassLike {
   language?: string;
 }
 
+if (typeof window !== "undefined") {
+  window.customCards = window.customCards || [];
+  window.customCards.push({
+    type: "mdr-event-history-card",
+    name: "Умный Дом.ру — История событий",
+    description: "История вызовов и проходов по ключам с облачными именами.",
+    preview: false,
+  });
+}
+
 @customElement("mdr-event-history-card")
 export class EgEventHistoryCard extends LitElement {
   @property({ attribute: false }) public hass?: HassLike;

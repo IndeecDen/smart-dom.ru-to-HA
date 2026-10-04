@@ -9,11 +9,14 @@
  * Без go2rtc/TURN: едет по тому же WSS, что весь UI (работает удалённо/4G).
  * HTTPS-origin обязателен (браузер даёт микрофон только на secure origin).
  *
- * Установка: добавить как Lovelace-ресурс (JavaScript Module):
- *   /my_dom_ru_static/mdr-intercom-mic-card.js
+ * Модуль подключается интеграцией автоматически.
  * Карта на дашборд: `type: custom:mdr-intercom-mic-card`.
  */
 class EgIntercomMicCard extends HTMLElement {
+  static getStubConfig() {
+    return {};
+  }
+
   setConfig(config) {
     this._config = config || {};
     this._render();
@@ -170,6 +173,7 @@ customElements.define("mdr-intercom-mic-card", EgIntercomMicCard);
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "mdr-intercom-mic-card",
-  name: "ЭГ Домофон — Микрофон",
+  name: "Умный Дом.ру — Микрофон",
   description: "Кнопка «говорить»: микрофон браузера → домофон (two-way audio uplink).",
+  preview: false,
 });

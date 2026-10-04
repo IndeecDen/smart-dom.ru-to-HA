@@ -11,6 +11,7 @@
 <div id="cards"></div>
 <script type="module">
   import "../../custom_components/my_dom_ru/www/mdr-intercom-call-card.js";
+  import "../../custom_components/my_dom_ru/www/mdr-intercom-mic-card.js";
   const checks = [];
   const check = (label, condition) => {
     checks.push({ label, passed: Boolean(condition) });
@@ -32,6 +33,11 @@
     await new Promise(resolve => setTimeout(resolve, 50));
   };
   try {
+    for (const type of ["mdr-intercom-call-card", "mdr-event-history-card", "mdr-intercom-mic-card"]) {
+      const entries = window.customCards.filter(card => card.type === type);
+      check(`${type} is available once in the card picker`,
+        entries.length === 1 && entries[0].name.startsWith("Умный Дом.ру") && customElements.get(type));
+    }
     const call = document.createElement("mdr-intercom-call-card");
     call.setConfig({ call_state: "sensor.call", lock: "lock.test", open_action: "slide", mic: false });
     call.hass = hass;

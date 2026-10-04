@@ -9,7 +9,8 @@
   ],
   "config_flow": true,
   "dependencies": [
-    "http"
+    "http",
+    "frontend"
   ],
   "documentation": "https://github.com/IndeecDen/smart-dom.ru-to-HA",
   "integration_type": "hub",
@@ -18,5 +19,5 @@
     "firebase-messaging==0.4.5",
     "audioop-lts>=0.2.1;python_version>='3.13'"
   ],
-  "version": "0.1.2"
+  "version": "0.1.3"
 }
