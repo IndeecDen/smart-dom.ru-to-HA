@@ -288,9 +288,6 @@ export function resolveHistoryConfig(value: unknown): HistoryCardConfig {
     ...(Array.isArray(value.entities) ? value.entities : []),
   ];
   const entities = [...new Set(configured)];
-  if (!entities.length) {
-    throw new Error("mdr-event-history-card: укажите 'entity' или 'entities'");
-  }
   if (entities.some((entity) => typeof entity !== "string" || !entity.startsWith("event."))) {
     throw new Error("mdr-event-history-card: все 'entity' должны быть event-сущностями");
   }

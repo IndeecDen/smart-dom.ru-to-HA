@@ -23,6 +23,7 @@ import {
 import { isCoarsePointer, type OpenAction, resolveOpenAction } from "./util/open-action.js";
 import { egTokens, statusColor } from "./theme/tokens.js";
 import { type Lang, langOf, t } from "./i18n.js";
+import { discoverCallConfig, type CallCardConfig as CardConfig, type DoorbellConfig as DoorbellCfg, type DiscoveryHass } from "./config.js";
 
 interface HassLike {
   states: Record<string, { state: string; attributes: Record<string, unknown> }>;
@@ -30,34 +31,6 @@ interface HassLike {
   callService: (domain: string, service: string, data?: Record<string, unknown>) => Promise<unknown>;
   locale?: { language?: string };
   language?: string;
-}
-
-interface DoorbellCfg {
-  call_state: string;
-  doorbell_camera?: string;
-  lock?: string;
-  name?: string;
-  address?: string;
-}
-
-interface CardConfig {
-  /** Камера активного вызова (видео+звук гостя), общая для всех домофонов. */
-  camera?: string;
-  /** Список домофонов; карточка показывает активный вызов любого из них. */
-  doorbells?: DoorbellCfg[];
-  // legacy: один домофон через поля верхнего уровня
-  call_state?: string;
-  doorbell_camera?: string;
-  lock?: string;
-  name?: string;
-  address?: string;
-  open_action?: string;
-  mic?: boolean;
-  mic_autostart?: boolean;
-  timer?: "auto" | "stopwatch" | "off";
-  idle_text?: string;
-  /** "compact" — одна строка (мини-превью + имя/статус + быстрые кнопки). */
-  layout?: "compact" | "full";
 }
 
 type OpenStatus = "idle" | "opening" | "opened" | "error";
@@ -114,11 +87,12 @@ export class EgIntercomCallCard extends LitElement {
       ?? (config?.call_state
         ? [{ call_state: config.call_state, doorbell_camera: config.doorbell_camera, lock: config.lock, name: config.name, address: config.address }]
         : []);
-    if (!list.length || list.some((d) => !d.call_state)) {
-      throw new Error("mdr-intercom-call-card: укажите 'doorbells' (с call_state) или 'call_state'");
+    if (!Array.isArray(list) || list.some((d) => !d || typeof d.call_state !== "string"
+      || (d.call_state && !d.call_state.startsWith("sensor.")))) {
+      throw new Error("mdr-intercom-call-card: call_state должен быть sensor-сущностью");
     }
     this._config = config;
-    this._doorbells = list;
+    this._doorbells = list.filter((d) => d.call_state);
     this._openAction = resolveOpenAction(config.open_action, isCoarsePointer());
   }
 
@@ -126,8 +100,13 @@ export class EgIntercomCallCard extends LitElement {
     return 8;
   }
 
-  public static getStubConfig(): CardConfig {
-    return { camera: "", doorbells: [{ call_state: "", doorbell_camera: "", lock: "" }] };
+  public static getStubConfig(hass?: DiscoveryHass): CardConfig {
+    return discoverCallConfig(hass);
+  }
+
+  public static async getConfigElement(): Promise<HTMLElement> {
+    const { createCardEditor } = await import("./editors.js");
+    return createCardEditor("mdr-intercom-call-card-editor");
   }
 
   public override disconnectedCallback(): void {
@@ -414,6 +393,11 @@ export class EgIntercomCallCard extends LitElement {
   }
 
   protected override render(): TemplateResult {
+    if (!this._doorbells.length) {
+      return html`<ha-card><div class="content" role="status">${this._lang === "en"
+        ? "Select a call state sensor in the card settings."
+        : "Выберите сенсор состояния вызова в настройках карточки."}</div></ha-card>`;
+    }
     const active = this._active;
     if (!active) return this._renderIdle();
 

@@ -38,6 +38,69 @@
       check(`${type} is available once in the card picker`,
         entries.length === 1 && entries[0].name.startsWith("Умный Дом.ру") && customElements.get(type));
     }
+    const fixtureHass = { ...hass, entities: {
+      "sensor.call": { entity_id: "sensor.call", platform: "my_dom_ru", translation_key: "call_state", device_id: "door" },
+      "lock.test": { entity_id: "lock.test", platform: "my_dom_ru", device_id: "door" },
+      "event.real": { entity_id: "event.real", platform: "my_dom_ru", translation_key: "account_history", device_id: "place" },
+    }, states: { ...hass.states, "lock.test": { state: "locked", attributes: {} }, "event.real": { state: "unknown", attributes: {} } } };
+    const CallCard = customElements.get("mdr-intercom-call-card");
+    const HistoryCard = customElements.get("mdr-event-history-card");
+    check("New call card selects real sensor and matching lock", CallCard.getStubConfig(fixtureHass).doorbells[0].lock === "lock.test");
+    check("New history card selects real history entity", HistoryCard.getStubConfig(fixtureHass).entities[0] === "event.real");
+    // Native HA form is represented by a test double on this standalone page.
+    let nativeEditorLoaded = false;
+    window.loadCardHelpers = async () => ({ createCardElement: () => {
+      customElements.define("hui-entities-card", class extends HTMLElement {
+        static async getConfigElement() {
+          nativeEditorLoaded = true;
+          customElements.define("ha-form", class extends HTMLElement {});
+        }
+      });
+      return document.createElement("hui-entities-card");
+    } });
+    const editor = await CallCard.getConfigElement();
+    editor.hass = fixtureHass;
+    editor.setConfig({ type: "custom:mdr-intercom-call-card", call_state: "sensor.call", lock: "lock.test", mic: false });
+    document.querySelector("#cards").append(editor);
+    await flush();
+    check("Visual editor loads native form lazily", nativeEditorLoaded && editor.shadowRoot.querySelectorAll("ha-form").length === 2);
+    let edited;
+    editor.addEventListener("config-changed", event => { edited = event.detail.config; });
+    editor.shadowRoot.querySelector("ha-form").dispatchEvent(new CustomEvent("value-changed", {
+      detail: { value: { call_state: "sensor.other", lock: "lock.test" } }, bubbles: true, composed: true,
+    }));
+    check("Changing doorbell clears old lock and preserves other options", edited.doorbells[0].call_state === "sensor.other" && !edited.doorbells[0].lock && edited.mic === false && edited.type === "custom:mdr-intercom-call-card");
+    editor.remove();
+    const historyEditor = await HistoryCard.getConfigElement();
+    historyEditor.hass = fixtureHass;
+    historyEditor.setConfig({ type: "custom:mdr-event-history-card", entity: "event.real", title: "Мой дом" });
+    document.querySelector("#cards").append(historyEditor);
+    await flush();
+    let editedHistory;
+    historyEditor.addEventListener("config-changed", event => { editedHistory = event.detail.config; });
+    const historyForm = historyEditor.shadowRoot.querySelector("ha-form");
+    historyForm.dispatchEvent(new CustomEvent("value-changed", {
+      detail: { value: { entities: ["event.new"] } }, bubbles: true, composed: true,
+    }));
+    check("History visual editor migrates entity and preserves title", editedHistory.entities[0] === "event.new" && !editedHistory.entity && editedHistory.title === "Мой дом");
+    historyEditor.remove();
+    const emptyCall = document.createElement("mdr-intercom-call-card");
+    emptyCall.setConfig(CallCard.getStubConfig());
+    document.querySelector("#cards").append(emptyCall);
+    await flush();
+    check("Empty call card gives setup guidance instead of configuration error", emptyCall.shadowRoot.textContent.includes("Выберите сенсор"));
+    emptyCall.remove();
+    const emptyHistory = document.createElement("mdr-event-history-card");
+    let historyRequests = 0;
+    emptyHistory.hass = { ...hass, callWS: async () => { historyRequests++; throw Error("fixture unavailable"); } };
+    emptyHistory.setConfig(HistoryCard.getStubConfig());
+    document.querySelector("#cards").append(emptyHistory);
+    await flush();
+    check("Empty history card requests no invented entity", historyRequests === 0 && emptyHistory.shadowRoot.textContent.includes("Выберите источник"));
+    emptyHistory.setConfig({ entity: "event.real" });
+    await flush();
+    check("Failed history renders one error and one retry", emptyHistory.shadowRoot.querySelectorAll('[role="alert"]').length === 1 && !emptyHistory.shadowRoot.querySelector(".more"));
+    emptyHistory.remove();
     const call = document.createElement("mdr-intercom-call-card");
     call.setConfig({ call_state: "sensor.call", lock: "lock.test", open_action: "slide", mic: false });
     call.hass = hass;

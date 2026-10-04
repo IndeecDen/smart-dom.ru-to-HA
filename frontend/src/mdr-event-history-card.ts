@@ -20,6 +20,7 @@ import {
   type HistorySource,
 } from "./history/model.js";
 import { historyCardStyles } from "./history/styles.js";
+import { discoverHistoryConfig, type DiscoveryHass } from "./config.js";
 
 interface HassLike {
   states: Record<string, { state: string; attributes: Record<string, unknown> }>;
@@ -60,21 +61,28 @@ export class EgEventHistoryCard extends LitElement {
     return 5;
   }
 
-  public static getStubConfig(): HistoryCardConfig {
-    return { entities: ["event.account_123456_place_7890_event_history"] };
+  public static getStubConfig(hass?: DiscoveryHass): HistoryCardConfig {
+    return discoverHistoryConfig(hass);
+  }
+
+  public static async getConfigElement(): Promise<HTMLElement> {
+    const { createCardEditor } = await import("./editors.js");
+    return createCardEditor("mdr-event-history-card-editor");
   }
 
   protected override updated(changed: PropertyValues): void {
     if (!changed.has("hass") && !changed.has("_config")) return;
     const entities = this._config?.entities;
     const entitiesKey = entities?.join("\u0000") ?? "";
-    if (!this.hass || !entities?.length || entitiesKey === this._loadedEntitiesKey) return;
+    if (!this.hass || entitiesKey === this._loadedEntitiesKey) return;
     this._loadedEntitiesKey = entitiesKey;
     this._events = [];
     this._selectedSource = "";
     this._feedStates = new Map();
     this._loaded = false;
-    void this._loadPages(true);
+    this._loading = false;
+    this._error = "";
+    if (entities?.length) void this._loadPages(true);
   }
 
   private get _lang(): Lang {
@@ -171,17 +179,17 @@ export class EgEventHistoryCard extends LitElement {
             class="refresh"
             aria-label=${strings.refresh}
             title=${strings.refresh}
-            ?disabled=${this._loading}
+            ?disabled=${this._loading || !this._config?.entities.length}
             @click=${this._refresh}
           ><mdr-icon class=${this._loading ? "spin" : ""} name="refresh-cw"></mdr-icon></button>
         </header>
         <div class="content" aria-live="polite">
           ${sources.length > 1 ? this._renderFilters(sources, strings) : nothing}
           ${this._renderBody(groups, strings, sources)}
-          ${this._loaded && this._error
+          ${this._loaded && this._error && this._events.length > 0
             ? html`<p class="inline-error" role="alert">${this._error}</p>`
             : nothing}
-          ${this._loaded && !this._allLast
+          ${this._loaded && !this._allLast && this._events.length > 0
             ? html`<footer><button class="more" ?disabled=${this._loading} @click=${this._more}>
                 ${this._loading ? strings.loading : strings.more}
               </button></footer>`
@@ -196,6 +204,11 @@ export class EgEventHistoryCard extends LitElement {
     strings: ReturnType<typeof historyStrings>,
     sources: HistorySource[],
   ): TemplateResult {
+    if (!this._config?.entities.length) {
+      return html`<div class="state" role="status">${this._lang === "en"
+        ? "Select a history source in the card settings."
+        : "Выберите источник истории в настройках карточки."}</div>`;
+    }
     if (!this._loaded && this._loading) {
       return html`<div class="state" role="status" aria-label=${strings.loading}>
         <div class="skeleton"><div class="skeleton-line"></div><div class="skeleton-line"></div></div>

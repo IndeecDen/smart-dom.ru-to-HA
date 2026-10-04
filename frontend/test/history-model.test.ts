@@ -112,7 +112,7 @@ describe("history presentation model", () => {
     expect(resolveHistoryConfig({
       entities: ["event.account_one", "event.account_two", "event.account_one"],
     })).toEqual({ entities: ["event.account_one", "event.account_two"] });
-    expect(() => resolveHistoryConfig({})).toThrow(/entity/);
+    expect(resolveHistoryConfig({})).toEqual({ entities: [] });
     expect(() => resolveHistoryConfig({ entity: "sensor.balance" })).toThrow(/event/);
     expect(() => resolveHistoryConfig({ entities: ["event.ok", "sensor.balance"] })).toThrow(/event/);
   });
