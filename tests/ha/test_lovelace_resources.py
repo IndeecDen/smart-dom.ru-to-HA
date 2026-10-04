@@ -12,6 +12,7 @@ from homeassistant.components.lovelace.resources import (
     ResourceYAMLCollection,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE
 
 from custom_components.my_dom_ru.lovelace import async_register_card_resources
 from custom_components.my_dom_ru.uplink_ws import (
@@ -33,6 +34,10 @@ async def card_hass(tmp_path):
         AsyncMock(return_value=SimpleNamespace(version="0.1.3")),
     ):
         yield hass
+    # This lightweight HA instance was never started, so async_stop alone
+    # skips the shutdown event that flushes the real collection's save timer.
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+    await hass.async_block_till_done()
     await hass.async_stop()
 
 
