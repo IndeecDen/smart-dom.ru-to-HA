@@ -1,6 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { pickCameraEntity } from "../src/components/call-video.js";
+import { EgCallVideo, pickCameraEntity } from "../src/components/call-video.js";
+
+afterEach(() => vi.unstubAllGlobals());
+
+it("loads the lazy HA camera module before choosing a provider", async () => {
+  let ready = false;
+  const createCardElement = vi.fn(() => { ready = true; });
+  vi.stubGlobal("window", { loadCardHelpers: async () => ({ createCardElement }) });
+  vi.stubGlobal("customElements", {
+    get: (name: string) => name === "ha-camera-stream" && ready ? class {} : undefined,
+    whenDefined: async () => {},
+  });
+  const video = new EgCallVideo() as unknown as {
+    _resolveProvider: () => Promise<void>; _provider: string;
+  };
+  await video._resolveProvider();
+  expect(createCardElement).toHaveBeenCalledWith({ type: "picture-glance", entities: [] });
+  expect(video._provider).toBe("ha");
+});
 
 const cfg = { camera: "camera.intercom_call", doorbell_camera: "camera.podyezd_2" };
 

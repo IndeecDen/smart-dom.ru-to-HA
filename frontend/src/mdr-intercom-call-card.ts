@@ -345,7 +345,7 @@ export class EgIntercomCallCard extends LitElement {
 
   private _open = async (): Promise<void> => {
     const lock = this._active?.lock;
-    if (!lock || !this.hass) return;
+    if (!lock || !this.hass || this._openStatus === "opening" || this._openStatus === "opened") return;
     this._openStatus = "opening";
     try {
       await this.hass.callService("lock", "unlock", { entity_id: lock });

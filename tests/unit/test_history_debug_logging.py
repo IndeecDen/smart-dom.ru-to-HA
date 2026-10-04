@@ -126,7 +126,7 @@ async def run(events, with_keys: bool = True):
         FakeCoordinator(events),
         HistoryWatermark(streams),
         emitted.append,
-        key_index=lambda: index,
+        key_index=lambda _place_id: index,
     )
     await poller.async_poll()
     return emitted

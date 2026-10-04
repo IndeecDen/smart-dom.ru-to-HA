@@ -49,9 +49,25 @@ export class EgCallVideo extends LitElement {
       this._provider = "ha";
       return;
     }
-    // Подгрузить HA card helpers — тянет hui-image → ha-camera-stream.
+    // Helpers alone do not load lazy picture cards or ha-camera-stream.
     try {
-      await (window as unknown as { loadCardHelpers?: () => Promise<unknown> }).loadCardHelpers?.();
+      const helpers = await (window as unknown as {
+        loadCardHelpers?: () => Promise<{
+          createCardElement: (config: Record<string, unknown>) => unknown;
+        }>;
+      }).loadCardHelpers?.();
+      if (helpers && !customElements.get("ha-camera-stream")) {
+        // Creating a detached card triggers HA's lazy module import without
+        // connecting a player or opening an additional stream.
+        helpers.createCardElement({ type: "picture-glance", entities: [] });
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(resolve, 5000);
+          void customElements.whenDefined("ha-camera-stream").then(() => {
+            clearTimeout(timeout);
+            resolve();
+          });
+        });
+      }
     } catch {
       /* ignore */
     }
@@ -71,7 +87,7 @@ export class EgCallVideo extends LitElement {
   private _syncWebrtc(changed: PropertyValues): void {
     const host = this.renderRoot.querySelector("#webrtc-host");
     if (!host || !this.entity || !this.hass) return;
-    if (changed.has("entity") || changed.has("_provider") || changed.has("muted") || !this._webrtcEl) {
+    if (changed.has("entity") || changed.has("_provider") || changed.has("muted") || !this._webrtcEl || this._webrtcEl.parentElement !== host) {
       host.replaceChildren();
       const el = document.createElement("webrtc-camera") as HTMLElement & {
         setConfig: (c: unknown) => void;

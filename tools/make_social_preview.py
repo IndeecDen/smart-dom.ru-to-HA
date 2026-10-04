@@ -77,4 +77,4 @@ if __name__ == "__main__":
         "Upload manually: repo -> About -> Edit -> "
         "Social preview -> Upload an image"
     )
-    print(f"  (dist/ is gitignored, so this file stays out of the repo)")
+    print("  (dist/ is gitignored, so this file stays out of the repo)")

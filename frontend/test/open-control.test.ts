@@ -1,11 +1,68 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   clamp01,
+  EgOpenControl,
   holdProgress,
   SLIDE_COMPLETE,
   slideProgress,
 } from "../src/components/open-control.js";
+
+// The Node Lit shim has no pointer dispatch, so drive the actual handlers
+// with the same event objects while observing the externally emitted command.
+function control() {
+  const el = new EgOpenControl();
+  const internals = el as unknown as {
+    _arming: boolean; _pointerId: number | null; _progress: number;
+    _onSlideUp: (e: PointerEvent) => void;
+    _onPointerCancel: (e: PointerEvent) => void;
+    _onTap: () => void;
+    updated: (changed: Map<string, unknown>) => void;
+  };
+  const dispatch = vi.fn(() => true);
+  el.dispatchEvent = dispatch;
+  internals._arming = true;
+  internals._pointerId = 1;
+  internals._progress = 1;
+  return { el, internals, dispatch };
+}
+
+describe("open gestures", () => {
+  it("cancel at the end of the track never opens the door", () => {
+    const { internals, dispatch } = control();
+    internals._onPointerCancel({ pointerId: 1 } as PointerEvent);
+    internals._onSlideUp({ pointerId: 1 } as PointerEvent);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(internals._progress).toBe(0);
+  });
+
+  it("ignores another pointer and commits the original gesture once", () => {
+    const { internals, dispatch } = control();
+    internals._onSlideUp({ pointerId: 2 } as PointerEvent);
+    expect(dispatch).not.toHaveBeenCalled();
+    internals._onSlideUp({ pointerId: 1 } as PointerEvent);
+    internals._onTap();
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("disabling during a drag prevents its completion", () => {
+    const { el, internals, dispatch } = control();
+    el.disabled = true;
+    internals._onSlideUp({ pointerId: 1 } as PointerEvent);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("blocks repeated taps until the card resets the result", () => {
+    const { el, internals, dispatch } = control();
+    internals._onTap();
+    internals._onTap();
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    el.status = "error";
+    internals.updated(new Map([["status", "opening"]]));
+    internals._onTap();
+    expect(dispatch).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("clamp01", () => {
   it("зажимает в [0..1]", () => {

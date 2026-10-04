@@ -67,6 +67,12 @@ export class EgOpenControl extends LitElement {
   private _holdStart = 0;
   private _trackRect: DOMRect | null = null;
   private _knobW = KNOB; // фактическая ширина ключа (учитывает --mdr-scale)
+  private _pointerId: number | null = null;
+  private _committed = false;
+
+  private get _blocked(): boolean {
+    return this.disabled || this._committed || this.status === "opening" || this.status === "opened";
+  }
 
   public override disconnectedCallback(): void {
     super.disconnectedCallback();
@@ -77,11 +83,15 @@ export class EgOpenControl extends LitElement {
     // Карта вернула контрол в покой/ошибку (после «Открыто» или неудачи) →
     // возвращаем ключ в начало, чтобы жест можно было повторить.
     if (changed.has("status") && (this.status === "idle" || this.status === "error")) {
-      this._progress = 0;
+      this._committed = false;
+      this._reset();
     }
+    if ((changed.has("disabled") && this.disabled) || changed.has("mode")) this._reset();
   }
 
   private _fireOpen(): void {
+    if (this._blocked) return;
+    this._committed = true;
     this.dispatchEvent(new CustomEvent("open", { bubbles: true, composed: true }));
   }
 
@@ -91,6 +101,7 @@ export class EgOpenControl extends LitElement {
     this._arming = false;
     this._progress = 0;
     this._trackRect = null;
+    this._pointerId = null;
   }
 
   /**
@@ -101,16 +112,25 @@ export class EgOpenControl extends LitElement {
    * начало и потом резко прыгал в «Открыто».
    */
   private _commit(): void {
+    if (this._blocked || !this._arming) {
+      this._reset();
+      return;
+    }
     if (this._raf) cancelAnimationFrame(this._raf);
     this._raf = 0;
     this._arming = false;
     this._progress = 1;
     this._trackRect = null;
+    this._pointerId = null;
     this._fireOpen();
   }
 
   // ---- hold ----
   private _holdTick = (): void => {
+    if (this._blocked || !this._arming) {
+      this._reset();
+      return;
+    }
     this._progress = holdProgress(performance.now() - this._holdStart, HOLD_MS);
     if (this._progress >= 1) {
       this._commit();
@@ -120,30 +140,37 @@ export class EgOpenControl extends LitElement {
   };
 
   private _onHoldDown = (e: PointerEvent): void => {
-    if (this.disabled) return;
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    if (this._blocked || this._arming || e.button !== 0) return;
+    this._pointerId = e.pointerId;
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     this._arming = true;
     this._holdStart = performance.now();
     this._raf = requestAnimationFrame(this._holdTick);
   };
 
-  private _onHoldUp = (): void => {
+  private _onHoldUp = (e: PointerEvent): void => {
+    if (e.pointerId !== this._pointerId) return;
     if (this._progress < 1) this._reset();
+  };
+
+  private _onPointerCancel = (e: PointerEvent): void => {
+    if (e.pointerId === this._pointerId) this._reset();
   };
 
   // ---- slide ----
   private _onSlideDown = (e: PointerEvent): void => {
-    if (this.disabled) return;
+    if (this._blocked || this._arming || e.button !== 0) return;
+    this._pointerId = e.pointerId;
     const track = (e.currentTarget as HTMLElement).closest(".track") as HTMLElement | null;
     this._trackRect = track?.getBoundingClientRect() ?? null;
     const knob = track?.querySelector(".knob") as HTMLElement | null;
     this._knobW = knob?.getBoundingClientRect().width || KNOB;
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     this._arming = true;
   };
 
   private _onSlideMove = (e: PointerEvent): void => {
-    if (!this._arming || !this._trackRect) return;
+    if (this._blocked || !this._arming || !this._trackRect || e.pointerId !== this._pointerId) return;
     this._progress = slideProgress(
       e.clientX,
       this._trackRect.left,
@@ -152,7 +179,8 @@ export class EgOpenControl extends LitElement {
     );
   };
 
-  private _onSlideUp = (): void => {
+  private _onSlideUp = (e: PointerEvent): void => {
+    if (!this._arming || e.pointerId !== this._pointerId) return;
     if (this._progress >= SLIDE_COMPLETE) {
       this._commit();
     } else {
@@ -162,7 +190,7 @@ export class EgOpenControl extends LitElement {
 
   // ---- tap ----
   private _onTap = (): void => {
-    if (!this.disabled) this._fireOpen();
+    this._fireOpen();
   };
 
   protected override render(): TemplateResult {
@@ -235,7 +263,7 @@ export class EgOpenControl extends LitElement {
 
   private _renderTap(): TemplateResult {
     return html`
-      <button class="pill tap ${this._statusClass()}" ?disabled=${this.disabled} @click=${this._onTap}
+      <button class="pill tap ${this._statusClass()}" ?disabled=${this._blocked} @click=${this._onTap}
               aria-label=${this._ariaLabel}>
         <div class="fill"></div>
         <span class="content"><mdr-icon name=${this._barIcon()}></mdr-icon>${this._labelText()}</span>
@@ -247,11 +275,12 @@ export class EgOpenControl extends LitElement {
     return html`
       <button
         class="pill hold ${this._arming ? "arming" : ""} ${this._statusClass()}"
-        ?disabled=${this.disabled}
+        ?disabled=${this._blocked}
         aria-label="${this._ariaLabel} ${t(this.uiLang).open.holdAriaSuffix}"
         @pointerdown=${this._onHoldDown}
         @pointerup=${this._onHoldUp}
-        @pointercancel=${this._onHoldUp}
+        @pointercancel=${this._onPointerCancel}
+        @lostpointercapture=${this._onPointerCancel}
         @pointerleave=${this._onHoldUp}
       >
         <div class="fill"></div>
@@ -269,6 +298,7 @@ export class EgOpenControl extends LitElement {
         aria-valuemin="0"
         aria-valuemax="100"
         aria-valuenow=${Math.round(this._vp() * 100)}
+        aria-disabled=${this._blocked ? "true" : "false"}
       >
         <mdr-icon class="lock-under" name="lock"></mdr-icon>
         <mdr-icon class="end" name="lock-open"></mdr-icon>
@@ -279,7 +309,8 @@ export class EgOpenControl extends LitElement {
           @pointerdown=${this._onSlideDown}
           @pointermove=${this._onSlideMove}
           @pointerup=${this._onSlideUp}
-          @pointercancel=${this._onSlideUp}
+          @pointercancel=${this._onPointerCancel}
+          @lostpointercapture=${this._onPointerCancel}
         >
           <mdr-icon name=${this._knobIcon()}></mdr-icon>
         </div>

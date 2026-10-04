@@ -134,7 +134,7 @@ class TestHandlePlaceEvent:
 
         listener = DoorbellFcmListener.__new__(DoorbellFcmListener)
         listener._hass = MagicMock()
-        listener._key_index = build_key_index(keys) if keys else {}
+        listener._key_index = {"55": build_key_index(keys)} if keys else {}
         dispatched: list[tuple[str, dict]] = []
         return listener, dispatched
 
@@ -203,5 +203,4 @@ class TestHandlePlaceEvent:
         listener, dispatched = self.make_listener(self.KEYS)
         assert listener._async_handle_place_event({}) is False
         assert dispatched == []
-
 

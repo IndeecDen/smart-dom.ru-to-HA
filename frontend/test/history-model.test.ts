@@ -34,6 +34,21 @@ const ROWS: HistoryEventRow[] = [
 ];
 
 describe("history page transport", () => {
+  it("preserves key openings and rejects dates that would crash rendering", () => {
+    const page = normalizeHistoryPage({
+      entity_id: "event.place", events: [
+        { event_id: "key", event_type: "key_activated", occurred_at: 1770033600,
+          key_name: "Денис", message: "private raw text", place_id: "55", source_id: "" },
+        { event_id: "bad", event_type: "call_missed", occurred_at: 1e30 },
+      ],
+    });
+    expect(page.events).toHaveLength(1);
+    expect(page.events[0]).toMatchObject({ event_type: "key_activated", key_name: "Денис",
+      source_key: "event.place:55:" });
+    expect(JSON.stringify(page)).not.toContain("private raw text");
+    expect(() => groupEventsByDay(page.events, "ru")).not.toThrow();
+    expect(historyStrings("ru").event.key_activated).toBe("Домофон: открыт ключом");
+  });
   it("uses the entity-scoped WebSocket command", async () => {
     const callWS = vi.fn().mockResolvedValue({
       entity_id: "event.intercom_history",

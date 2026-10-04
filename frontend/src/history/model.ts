@@ -1,6 +1,6 @@
 import type { Lang } from "../i18n.js";
 
-export type HistoryEventType = "call_accepted" | "call_missed";
+export type HistoryEventType = "call_accepted" | "call_missed" | "key_activated";
 
 export interface HistoryEventRow {
   event_id: string;
@@ -13,6 +13,7 @@ export interface HistoryEventRow {
   /** Stable client-side identity for one account/place/access-control source. */
   source_key: string;
   source_name: string;
+  key_name?: string;
 }
 
 export interface HistoryPage {
@@ -72,6 +73,7 @@ const STRINGS: Record<Lang, HistoryStrings> = {
     event: {
       call_accepted: "Домофон: принят звонок",
       call_missed: "Домофон: пропущен звонок",
+      key_activated: "Домофон: открыт ключом",
     },
     empty: "Событий пока нет",
     unavailable: "Не удалось загрузить историю",
@@ -87,6 +89,7 @@ const STRINGS: Record<Lang, HistoryStrings> = {
     event: {
       call_accepted: "Intercom: answered call",
       call_missed: "Intercom: missed call",
+      key_activated: "Intercom: opened with a key",
     },
     empty: "No events yet",
     unavailable: "Unable to load history",
@@ -104,7 +107,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isHistoryType(value: unknown): value is HistoryEventType {
-  return value === "call_accepted" || value === "call_missed";
+  return value === "call_accepted" || value === "call_missed" || value === "key_activated";
 }
 
 /** Keep only the documented, privacy-safe response shape. */
@@ -121,6 +124,7 @@ export function normalizeHistoryPage(value: unknown): HistoryPage {
       || !isHistoryType(raw.event_type)
       || typeof raw.occurred_at !== "number"
       || !Number.isFinite(raw.occurred_at)
+      || !Number.isFinite(new Date(raw.occurred_at * 1000).getTime())
     ) {
       return [];
     }
@@ -135,10 +139,12 @@ export function normalizeHistoryPage(value: unknown): HistoryPage {
       occurred_at: raw.occurred_at,
       feed_id: entityId,
       feed_name: feedName,
-      source_key: placeId && sourceId
+      source_key: placeId
         ? `${entityId}:${placeId}:${sourceId}`
         : entityId,
       source_name: sourceName,
+      ...(raw.event_type === "key_activated" && typeof raw.key_name === "string"
+        ? { key_name: raw.key_name } : {}),
     }];
   });
   return {

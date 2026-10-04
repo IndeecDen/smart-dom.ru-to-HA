@@ -16,7 +16,7 @@ from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN, EVENT_KEY_ACTIVATED, LOGGER
 from .access_keys import (
-    build_key_index,
+    refresh_place_key_indexes,
     mask_secrets,
     resolve_key_identity,
 )
@@ -41,7 +41,7 @@ HISTORY_POLL_INTERVAL = timedelta(minutes=5)
 SIGNAL_HISTORY_EVENT = f"{DOMAIN}_history_event"
 
 
-def _no_key_names() -> Mapping[str, str]:
+def _no_key_names(_place_id: str) -> Mapping[str, str]:
     """Default when no access-key names could be loaded at all."""
     return {}
 
@@ -143,7 +143,7 @@ class HistoryPoller:
         emit: Callable[[dict[str, Any]], None],
         *,
         camera_enabled: Callable[[str], bool] | None = None,
-        key_index: Callable[[], Mapping[str, str]] | None = None,
+        key_index: Callable[[str], Mapping[str, str]] | None = None,
     ) -> None:
         self._coordinator = coordinator
         self._watermark = watermark
@@ -218,7 +218,7 @@ class HistoryPoller:
                         # forever in 0.1.0.
                         unmapped.add(event.event_type)
                     key_name = resolve_key_identity(
-                        event.message, self._key_index()
+                        event.message, self._key_index(event.place_id)
                     )
                     if key_name is not None and (
                         now - datetime.fromtimestamp(event.timestamp, UTC)
@@ -389,7 +389,7 @@ class HistoryManager:
         self._poller: HistoryPoller | None = None
         self._unsub_interval: CALLBACK_TYPE | None = None
         self._poll_lock = asyncio.Lock()
-        self._key_index: dict[str, str] = {}
+        self._key_index: dict[str, dict[str, str]] = {}
 
     async def async_start(self) -> None:
         """Restore opaque IDs, establish a baseline, then schedule polling."""
@@ -413,7 +413,7 @@ class HistoryManager:
             # A lambda, not the dict: the poller calls this to read the
             # current index. Passing `self._key_index` directly would shadow
             # the attribute with a plain mapping and raise on call.
-            key_index=lambda: self._key_index,
+            key_index=lambda place_id: self._key_index.get(place_id, {}),
         )
         await self.async_poll()
         self._unsub_interval = async_track_time_interval(
@@ -464,14 +464,9 @@ class HistoryManager:
         than clearing it, so a transient 5xx does not make every later event
         anonymous.
         """
-        for subscriber_place in (self._coordinator.data or {}).get("places") or []:
-            place_id = (subscriber_place.get("place") or {}).get("id")
-            if place_id is None:
-                continue
-            keys = await self._coordinator.api.query_access_keys(place_id)
-            if keys:
-                self._key_index = build_key_index(keys)
-            return
+        self._key_index = await refresh_place_key_indexes(
+            self._coordinator.api, self._coordinator.data, self._key_index
+        )
 
     async def _async_interval(self, _now: datetime) -> None:
         """Handle one HA interval callback."""

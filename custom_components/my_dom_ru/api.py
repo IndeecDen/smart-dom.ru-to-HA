@@ -116,7 +116,7 @@ class MyDomRuAPI:
             raise ValueError("missing_phone")
         return self._phone
 
-    async def query_access_keys(self, place_id: str | int) -> list[Any]:
+    async def query_access_keys(self, place_id: str | int) -> list[Any] | None:
         """List the place's access keys in the operator's raw shape.
 
         Used to learn who each key belongs to. The operator's own names are
@@ -124,9 +124,9 @@ class MyDomRuAPI:
         notification as "Денис", with no code anywhere — so nothing has to be
         configured to turn a door opening into a name.
 
-        Failures return an empty list: a missing name mapping degrades the
-        event to an anonymous "someone opened with a key", which is far better
-        than dropping the event.
+        None means the lookup failed; [] means the place has no keys. Keeping
+        these distinct lets callers retain cached names through an outage and
+        discard them when keys really have been removed.
         """
         from .app_api import AppApi, unwrap  # noqa: PLC0415
 
@@ -135,9 +135,9 @@ class MyDomRuAPI:
                 "list_access_keys", {"place_id": place_id}
             )
         except Exception:  # noqa: BLE001
-            return []
+            return None
         result = unwrap(payload)
-        return result if isinstance(result, list) else []
+        return result if isinstance(result, list) else None
 
     async def query_contracts(self, phone: str) -> dict[str, Any]:
         """Query the list of contracts for the given phone number."""
@@ -164,10 +164,10 @@ class MyDomRuAPI:
 
         except Exception as e:
             if error_status(e) == 400:
-                raise ValueError("invalid_login")
+                raise ValueError("invalid_login") from None
             if isinstance(e, ValueError):
                 raise
-            raise ValueError("unknown_status")
+            raise ValueError("unknown_status") from None
 
     async def verify_password(self, timestamp: str, hash1: str, hash2: str) -> dict[str, Any]:
         """Authenticate using password."""
@@ -191,8 +191,8 @@ class MyDomRuAPI:
 
         except Exception as e:
             if error_status(e) == 400:
-                raise ValueError("invalid_password")
-            raise ValueError("unknown_status")
+                raise ValueError("invalid_password") from None
+            raise ValueError("unknown_status") from None
 
     async def request_sms_code(self, contract: dict[str, Any]) -> None:
         """Request SMS code for the selected contract."""
@@ -217,8 +217,8 @@ class MyDomRuAPI:
 
         except Exception as e:
             if error_status(e) == 429:
-                raise ValueError("limit_exceeded")
-            raise ValueError("unknown_status")
+                raise ValueError("limit_exceeded") from None
+            raise ValueError("unknown_status") from None
 
     async def verify_sms_code(self, contract: dict[str, Any], code: str) -> dict[str, Any]:
         """Verify the SMS code."""
@@ -244,8 +244,8 @@ class MyDomRuAPI:
 
         except Exception as e:
             if error_status(e) == 406:
-                raise ValueError("invalid_format")
-            raise ValueError("unknown_status")
+                raise ValueError("invalid_format") from None
+            raise ValueError("unknown_status") from None
 
     async def query_profile(self) -> dict[str, Any]:
         """Query the subscriber profile."""
@@ -262,8 +262,8 @@ class MyDomRuAPI:
 
         except Exception as e:
             if error_status(e) == 401:
-                raise ValueError("unauthorized")
-            raise ValueError("unknown_status")
+                raise ValueError("unauthorized") from None
+            raise ValueError("unknown_status") from None
 
     async def query_balance(self, place_id: str) -> dict[str, Any]:
         """Query the balance/finance info for a place."""

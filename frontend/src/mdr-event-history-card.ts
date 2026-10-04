@@ -214,13 +214,15 @@ export class EgEventHistoryCard extends LitElement {
     sources: HistorySource[],
   ): TemplateResult {
     const missed = event.event_type === "call_missed";
+    const key = event.event_type === "key_activated";
     const occurred = new Date(event.occurred_at * 1000);
     const source = sources.find((item) => item.key === event.source_key)?.label
       ?? event.source_name;
     return html`<li class="event ${missed ? "missed" : "accepted"}">
-      <span class="event-icon"><mdr-icon name=${missed ? "phone-off" : "phone"}></mdr-icon></span>
+      <span class="event-icon"><mdr-icon name=${key ? "key-round" : missed ? "phone-off" : "phone"}></mdr-icon></span>
       <span class="event-copy">
         <span class="event-title">${strings.event[event.event_type]}</span>
+        ${key && event.key_name ? html`<span class="source">${event.key_name}</span>` : nothing}
         ${source ? html`<span class="source">${source}</span>` : nothing}
       </span>
       <time datetime=${occurred.toISOString()}>${formatHistoryTime(event.occurred_at, this._lang)}</time>

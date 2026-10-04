@@ -33,8 +33,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from .access_keys import (
-    build_key_index,
-    describe_key_payload,
+    refresh_place_key_indexes,
     mask_secrets,
     resolve_key_identity,
 )
@@ -316,7 +315,7 @@ class DoorbellFcmListener:
         # Name index for access keys, kept warm by a timer. A door opening
         # must be named the moment the push lands, and the push callback is
         # synchronous, so the keys are fetched ahead of time.
-        self._key_index: dict[str, str] = {}
+        self._key_index: dict[str, dict[str, str]] = {}
         self._key_index_unsub: Any = None
         # Watchdog: unsub периодического контроля живости + guard от
         # перекрытия повторных переподнятий.
@@ -590,7 +589,7 @@ class DoorbellFcmListener:
             },
         )
 
-    async def async_refresh_key_index(self) -> None:
+    async def async_refresh_key_index(self, _now: datetime | None = None) -> None:
         """Reload the key name index from the operator.
 
         Kept warm on a timer rather than fetched inside the push callback,
@@ -599,28 +598,19 @@ class DoorbellFcmListener:
         """
         if self._coordinator is None:
             return
-        for place in (self._coordinator.data or {}).get("places") or []:
-            place_id = (place.get("place") or {}).get("id")
-            if place_id is None:
-                continue
-            keys = await self._api.query_access_keys(place_id)
-            self._key_index = build_key_index(keys)
-            LOGGER.debug(
-                "FCM: индекс ключей обновлён: ответ=%s, форм=%d, place_id=%s",
-                describe_key_payload(keys),
-                len(self._key_index),
-                place_id,
-            )
-            return
+        self._key_index = await refresh_place_key_indexes(
+            self._api, self._coordinator.data, self._key_index
+        )
+        LOGGER.debug("FCM: индексы ключей обновлены для %d адресов", len(self._key_index))
 
-    def _resolve_key_name(self, message: Any) -> str | None:
+    def _resolve_key_name(self, message: Any, place_id: str) -> str | None:
         """Resolve a key name from a message.
 
         Names come from the operator: they are the same ones the phone app
         shows, so a key renamed in the app is renamed here too, and there is
         nothing to configure.
         """
-        return resolve_key_identity(message, self._key_index)
+        return resolve_key_identity(message, self._key_index.get(place_id, {}))
 
     def _async_handle_place_event(self, data: dict[str, Any]) -> bool:
         """Dispatch an `accessKeyActivated` push, if this is one.
@@ -639,7 +629,7 @@ class DoorbellFcmListener:
             LOGGER.debug("FCM: placeEvent не разобран (%s) — пропуск", type(raw).__name__)
             return True
         by_type = event["event_type"] == _PUSH_ACCESS_KEY_EVENT
-        key_name = self._resolve_key_name(event["message"])
+        key_name = self._resolve_key_name(event["message"], event["place_id"])
         if not by_type and key_name is None:
             # Neither the type we expect nor a known key in the text: not ours.
             # Still worth logging, because it proves the push channel is alive

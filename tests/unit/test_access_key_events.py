@@ -97,7 +97,7 @@ async def run_poll(events, *, index=INDEX, baseline=True):
         FakeCoordinator(events),
         HistoryWatermark(streams),
         emitted.append,
-        key_index=lambda: index,
+        key_index=lambda place_id: index if place_id == "55" else {},
     )
     await poller.async_poll()
     return emitted

@@ -1,0 +1,79 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Дом.ру — проверка карточек</title>
+<style>
+  body { background: #fafafa; color: #212121; font: 16px sans-serif; margin: 24px; }
+  #cards { width: 360px; }
+  ha-card { display: block; border: 1px solid #ccc; margin-bottom: 20px; }
+</style>
+<h1>Проверка собранных карточек</h1>
+<pre id="result">Running…</pre>
+<div id="cards"></div>
+<script type="module">
+  import "../../custom_components/my_dom_ru/www/mdr-intercom-call-card.js";
+  const checks = [];
+  const check = (label, condition) => {
+    checks.push({ label, passed: Boolean(condition) });
+    if (!condition) throw new Error(label);
+  };
+  // Local fixture only: service calls never leave this page.
+  const calls = [];
+  const hass = {
+    language: "ru",
+    states: { "sensor.call": { state: "ringing", attributes: {} } },
+    callService: async (...args) => calls.push(args),
+    callWS: async ({ entity_id }) => ({
+      entity_id, page: 0, last: true, source_name: "Тестовый адрес",
+      events: [{ event_id: "test-key", event_type: "key_activated",
+        occurred_at: 1770033600, key_name: "Тестовый ключ" }],
+    }),
+  };
+  const flush = async () => {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  };
+  try {
+    const call = document.createElement("mdr-intercom-call-card");
+    call.setConfig({ call_state: "sensor.call", lock: "lock.test", open_action: "slide", mic: false });
+    call.hass = hass;
+    document.querySelector("#cards").append(call);
+    await flush();
+    const control = call.shadowRoot.querySelector("mdr-open-control");
+    const track = control.shadowRoot.querySelector(".track");
+    for (const width of [360, 1000]) {
+      document.querySelector("#cards").style.width = `${width}px`;
+      await flush();
+      const rect = track.getBoundingClientRect();
+      check(`Track visible at ${width}px`, rect.width > 200 && rect.height >= 80);
+    }
+    document.querySelector("#cards").style.width = "360px";
+    await flush();
+    const knob = control.shadowRoot.querySelector(".knob");
+    knob.setPointerCapture = () => {}; // Synthetic pointer, no OS capture.
+    const rect = track.getBoundingClientRect();
+    const pointer = (type, x) => knob.dispatchEvent(new PointerEvent(type, {
+      bubbles: true, pointerId: 1, button: 0, clientX: x,
+    }));
+    pointer("pointerdown", rect.left + 34);
+    pointer("pointermove", rect.right);
+    pointer("pointercancel", rect.right);
+    pointer("pointerup", rect.right);
+    check("Cancelled slide sends no unlock", calls.length === 0);
+    pointer("pointerdown", rect.left + 34);
+    pointer("pointermove", rect.right);
+    pointer("pointerup", rect.right);
+    await flush();
+    check("Completed slide sends one unlock", calls.length === 1 && calls[0][1] === "unlock");
+    const history = document.createElement("mdr-event-history-card");
+    history.setConfig({ entity: "event.test" });
+    history.hass = hass;
+    document.querySelector("#cards").append(history);
+    await flush();
+    const text = history.shadowRoot.textContent;
+    check("Key opening is rendered", text.includes("Домофон: открыт ключом"));
+    check("Cloud key name is rendered", text.includes("Тестовый ключ"));
+  } catch (error) {
+    checks.push({ error: String(error), passed: false });
+  }
+  window.smokeResults = checks;
+  document.querySelector("#result").textContent = JSON.stringify(checks, null, 2);
+</script>

@@ -149,6 +149,29 @@ def describe_key_payload(keys: Any) -> str:
     return f"{len(keys)} items, top={sorted(first)}, accessKey={inner}"
 
 
+async def refresh_place_key_indexes(
+    api: Any,
+    data: Mapping[str, Any] | None,
+    previous: Mapping[str, dict[str, str]],
+) -> dict[str, dict[str, str]]:
+    """Refresh every place, keeping its last good index on lookup failure."""
+    indexes = {}
+    for item in (data or {}).get("places") or []:
+        place_id = (item.get("place") or {}).get("id")
+        if place_id is None or str(place_id) in indexes:
+            continue
+        key = str(place_id)
+        try:
+            keys = await api.query_access_keys(place_id)
+        except Exception:  # noqa: BLE001 - cached names survive optional API failure
+            keys = None
+        indexes[key] = (
+            build_key_index(keys) if isinstance(keys, list)
+            else previous.get(key, {})
+        )
+    return indexes
+
+
 def resolve_key_identity(
     message: Any,
     index: Mapping[str, str],

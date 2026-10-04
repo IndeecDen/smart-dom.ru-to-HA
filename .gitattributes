@@ -14,3 +14,6 @@
 *.jpg binary
 *.ico binary
 *.zip binary
+
+# esbuild preserves meaningful whitespace inside Lit's multiline regex strings.
+custom_components/my_dom_ru/www/mdr-intercom-call-card.js whitespace=-blank-at-eol

@@ -15,7 +15,8 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 
 from .coordinator import async_get_coordinator
-from .const import CONF_ACCOUNT_ID, CONF_SUBSCRIBER_ID, DOMAIN, LOGGER
+from .const import CONF_ACCOUNT_ID, CONF_SUBSCRIBER_ID, DOMAIN, EVENT_KEY_ACTIVATED, LOGGER
+from .access_keys import build_key_index, resolve_key_identity
 from .history import map_general_event_type, place_display_name
 
 
@@ -184,27 +185,66 @@ async def async_handle_history(
         )
         return
 
-    events = []
-    for event in page.events:
-        event_type = map_general_event_type(event.event_type)
-        source_key = (event.place_id, event.source_id)
-        if (
-            event_type is None
-            or event.source_type != "accessControl"
-            or source_key not in target.sources
+    indexes = {}
+    for place_id in target.place_ids:
+        if not any(
+            event.place_id == place_id
+            and event.event_type in ("infoNotification", "accessKeyActivated")
+            for event in page.events
         ):
             continue
+        try:
+            keys = await target.coordinator.api.query_access_keys(place_id)
+        except Exception:  # noqa: BLE001 - browsing calls still works without names
+            keys = None
+        indexes[place_id] = build_key_index(keys)
+
+    all_sources = _access_control_sources(target.coordinator)
+    events = []
+    for event in page.events:
+        if event.place_id not in target.place_ids:
+            continue
+        event_type = map_general_event_type(event.event_type)
+        key_name = resolve_key_identity(event.message, indexes.get(event.place_id, {}))
+        by_content = event.event_type == "infoNotification" and key_name is not None
+        if by_content:
+            event_type = EVENT_KEY_ACTIVATED
+        source_key = (event.place_id, event.source_id)
+        source_name = target.sources.get(source_key)
+        if event_type is None:
+            continue
+        if event.source_type != "accessControl" or source_key not in target.sources:
+            place_scoped = event_type == EVENT_KEY_ACTIVATED and (
+                by_content
+                or (event.source_type in ("place", "subscriberPlace")
+                    and event.source_id == event.place_id)
+            )
+            if not place_scoped:
+                continue
+            place_sources = [key for key in all_sources if key[0] == event.place_id]
+            if len(place_sources) == 1:
+                source_key = place_sources[0]
+                source_name = target.sources.get(source_key)
+            elif target.aggregate:
+                source_key = (event.place_id, "")
+                source_name = place_display_name(target.coordinator.data, event.place_id)
+            else:
+                continue
+            if not target.aggregate and source_key not in target.sources:
+                continue
         result = {
             "event_id": event.id,
             "event_type": event_type,
             "occurred_at": event.timestamp,
         }
+        if event_type == EVENT_KEY_ACTIVATED and key_name:
+            result["key_name"] = key_name
         if target.aggregate:
             result.update(
                 {
                     "place_id": event.place_id,
-                    "source_id": event.source_id,
-                    "source_name": target.sources[source_key],
+                    "source_id": source_key[1],
+                    "source_name": source_name,
                 }
             )
         events.append(result)
