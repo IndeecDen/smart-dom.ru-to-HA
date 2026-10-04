@@ -1,12 +1,12 @@
 # Умный Дом.ру для Home Assistant
 
 <p align="center">
-  <img src="custom_components/my_dom_ru/brand/logo.png" alt="Умный Дом.ру" width="180">
+  <img src="https://raw.githubusercontent.com/IndeecDen/smart-dom.ru-to-HA/main/custom_components/my_dom_ru/brand/logo.png" alt="Умный Дом.ру" width="180">
 </p>
 
-[![Release](https://img.shields.io/github/v/release/IndeecDen/smart-dom.ru-to-HA?label=Release)](https://github.com/IndeecDen/smart-dom.ru-to-HA/releases/latest)
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41f5f4.svg)](https://hacs.xyz)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[Последний релиз](https://github.com/IndeecDen/smart-dom.ru-to-HA/releases/latest) ·
+[HACS: пользовательский репозиторий](https://hacs.xyz) ·
+[Лицензия MIT](https://github.com/IndeecDen/smart-dom.ru-to-HA/blob/main/LICENSE)
 
 Неофициальная интеграция облака «Умный Дом.ру» (ЭР-Телеком, пакет
 `com.ertelecom.smarthome`, профиль приложения 9.10.0) в Home Assistant.
@@ -14,7 +14,7 @@
 баланс, «Не беспокоить» и дополнительные действия для временных пропусков,
 электронных ключей, настроек личных камер, документов и обращений.
 
-> **Статус: 0.1.4, интеграция использует закрытое облако оператора.**
+> **Статус: 0.1.5, интеграция использует закрытое облако оператора.**
 > Получение FCM-уведомлений и распознавание прохода по ключу проверялись на
 > реальном аккаунте. Остальные функции зависят от адреса, тарифа и устройства;
 > сквозная проверка всех команд и потоков на разных установках не проводилась.
@@ -75,7 +75,7 @@
 
 ### Вручную
 
-Скачайте `my_dom_ru-0.1.4-manual.zip` со страницы
+Скачайте `my_dom_ru-0.1.5-manual.zip` со страницы
 [релизов](https://github.com/IndeecDen/smart-dom.ru-to-HA/releases) и распакуйте
 в конфигурационный каталог HA так, чтобы получился путь
 `custom_components/my_dom_ru/manifest.json`. Перезапустите Home Assistant.
